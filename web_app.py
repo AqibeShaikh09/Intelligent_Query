@@ -5,6 +5,8 @@ import json
 from app import extract_text_from_pdf, create_document_embeddings, generate_response
 import tempfile
 import traceback
+import time
+import gc
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
@@ -21,7 +23,9 @@ current_document = {
     'embeddings': None,
     'index': None,
     'model_st': None,
-    'filename': None
+    'filename': None,
+    'upload_time': None,
+    'chunk_count': 0
 }
 
 def allowed_file(filename):
@@ -34,238 +38,513 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PDF Question-Answer System</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <title>AI PDF Chat</title>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
         body {
+            font-family: 'Poppins', sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
         }
-        .main-container {
-            background: rgba(255, 255, 255, 0.95);
-            border-radius: 15px;
-            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1);
-            backdrop-filter: blur(10px);
-        }
-        .chat-container {
-            height: 400px;
-            overflow-y: auto;
-            border: 1px solid #e9ecef;
-            border-radius: 10px;
-            padding: 1rem;
-            background: #f8f9fa;
-        }
-        .message {
-            margin-bottom: 1rem;
-            padding: 0.75rem;
-            border-radius: 10px;
-            max-width: 80%;
-        }
-        .user-message {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            margin-left: auto;
-            margin-right: 0;
-        }
-        .bot-message {
+        
+        .app-container {
             background: white;
-            border: 1px solid #e9ecef;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 800px;
+            overflow: hidden;
+            animation: slideUp 0.6s ease-out;
         }
-        .loading {
-            display: none;
+        
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(30px); }
+            to { opacity: 1; transform: translateY(0); }
         }
-        .file-upload-area {
-            border: 3px dashed #667eea;
-            border-radius: 15px;
-            padding: 3rem 2rem;
-            text-align: center;
-            transition: all 0.3s;
-            background: rgba(102, 126, 234, 0.05);
-        }
-        .file-upload-area:hover {
-            border-color: #764ba2;
-            background: rgba(118, 75, 162, 0.1);
-        }
-        .btn-primary {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            border: none;
-            border-radius: 25px;
-            padding: 0.75rem 2rem;
-        }
-        .btn-primary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
-        }
-        .card {
-            border: none;
-            border-radius: 15px;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.08);
-        }
-        .card-header {
+        
+        .header {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
-            border-radius: 15px 15px 0 0 !important;
-            border: none;
+            padding: 30px;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
         }
-        .alert {
-            border-radius: 10px;
-            border: none;
+        
+        .header::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
+            animation: pulse 3s ease-in-out infinite;
         }
-        .spinner-border {
+        
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 0.5; }
+            50% { transform: scale(1.1); opacity: 0.8; }
+        }
+        
+        .header h1 {
+            font-size: 2.5rem;
+            font-weight: 600;
+            margin: 0;
+            position: relative;
+            z-index: 2;
+        }
+        
+        .header p {
+            margin: 10px 0 0 0;
+            opacity: 0.9;
+            font-weight: 300;
+            position: relative;
+            z-index: 2;
+        }
+        
+        .content {
+            padding: 0;
+        }
+        
+        .upload-section {
+            padding: 40px;
+            text-align: center;
+        }
+        
+        .upload-area {
+            border: 3px dashed #e0e7ff;
+            border-radius: 15px;
+            padding: 60px 20px;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            position: relative;
+            background: linear-gradient(145deg, #f8fafc 0%, #f1f5f9 100%);
+        }
+        
+        .upload-area:hover {
+            border-color: #667eea;
+            background: linear-gradient(145deg, #eef2ff 0%, #e0e7ff 100%);
+            transform: translateY(-2px);
+        }
+        
+        .upload-icon {
+            font-size: 4rem;
             color: #667eea;
+            margin-bottom: 20px;
+            transition: all 0.3s ease;
+        }
+        
+        .upload-area:hover .upload-icon {
+            transform: scale(1.1);
+            color: #764ba2;
+        }
+        
+        .upload-text {
+            font-size: 1.2rem;
+            color: #4a5568;
+            margin-bottom: 10px;
+            font-weight: 500;
+        }
+        
+        .upload-subtext {
+            color: #718096;
+            font-size: 0.9rem;
+        }
+        
+        .file-input {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            opacity: 0;
+            cursor: pointer;
+        }
+        
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 50px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-top: 20px;
+            font-size: 1rem;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.3);
+        }
+        
+        .chat-section {
+            height: 600px;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .document-info {
+            background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+            padding: 20px;
+            border-bottom: 1px solid #e2e8f0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .doc-details h3 {
+            color: #1e40af;
+            margin: 0;
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+        
+        .doc-details p {
+            color: #64748b;
+            margin: 5px 0 0 0;
+            font-size: 0.9rem;
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background: #10b981;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+            animation: blink 2s infinite;
+        }
+        
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+        
+        .new-doc-btn {
+            background: white;
+            color: #667eea;
+            border: 2px solid #667eea;
+            padding: 8px 16px;
+            border-radius: 25px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 0.9rem;
+        }
+        
+        .new-doc-btn:hover {
+            background: #667eea;
+            color: white;
+            transform: scale(1.05);
+        }
+        
+        .chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            background: #fafafa;
+        }
+        
+        .chat-container::-webkit-scrollbar {
+            width: 6px;
+        }
+        
+        .chat-container::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 3px;
+        }
+        
+        .message {
+            margin-bottom: 20px;
+            animation: messageSlide 0.4s ease-out;
+        }
+        
+        @keyframes messageSlide {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .user-message {
+            text-align: right;
+        }
+        
+        .user-bubble {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px 20px;
+            border-radius: 20px 20px 5px 20px;
+            display: inline-block;
+            max-width: 80%;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+        }
+        
+        .bot-message {
+            text-align: left;
+        }
+        
+        .bot-bubble {
+            background: white;
+            color: #2d3748;
+            padding: 20px;
+            border-radius: 20px 20px 20px 5px;
+            display: inline-block;
+            max-width: 85%;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
+            border: 1px solid #e2e8f0;
+        }
+        
+        .decision-badge {
+            padding: 6px 12px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin-bottom: 10px;
+            display: inline-block;
+        }
+        
+        .covered { background: #dcfce7; color: #166534; }
+        .not-covered { background: #fef2f2; color: #991b1b; }
+        .partial { background: #fef3c7; color: #92400e; }
+        .unknown { background: #f3f4f6; color: #374151; }
+        
+        .input-section {
+            padding: 20px;
+            background: white;
+            border-top: 1px solid #e2e8f0;
+        }
+        
+        .input-container {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .question-input {
+            flex: 1;
+            padding: 15px 20px;
+            border: 2px solid #e2e8f0;
+            border-radius: 25px;
+            font-size: 1rem;
+            outline: none;
+            transition: all 0.3s ease;
+        }
+        
+        .question-input:focus {
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        
+        .send-btn {
+            width: 50px;
+            height: 50px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
+        }
+        
+        .send-btn:hover {
+            transform: scale(1.1);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+        }
+        
+        .suggestions {
+            margin-top: 15px;
+            text-align: center;
+        }
+        
+        .suggestion {
+            background: #f1f5f9;
+            color: #475569;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 20px;
+            margin: 5px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 0.9rem;
+        }
+        
+        .suggestion:hover {
+            background: #667eea;
+            color: white;
+            transform: translateY(-1px);
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #64748b;
+        }
+        
+        .spinner {
+            width: 30px;
+            height: 30px;
+            border: 3px solid #e2e8f0;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #64748b;
+        }
+        
+        .empty-icon {
+            font-size: 3rem;
+            margin-bottom: 20px;
+            opacity: 0.5;
+        }
+        
+        .notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 15px 20px;
+            border-radius: 10px;
+            color: white;
+            font-weight: 500;
+            z-index: 1000;
+            animation: slideIn 0.3s ease-out;
+        }
+        
+        .notification.success { background: #10b981; }
+        .notification.error { background: #ef4444; }
+        .notification.warning { background: #f59e0b; }
+        
+        @keyframes slideIn {
+            from { transform: translateX(100%); }
+            to { transform: translateX(0); }
+        }
+        
+        .flash-message {
+            background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
+            color: #1e40af;
+            padding: 15px 20px;
+            margin: 20px;
+            border-radius: 10px;
+            border-left: 4px solid #3b82f6;
+        }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .app-container { margin: 10px; }
+            .header h1 { font-size: 2rem; }
+            .upload-area { padding: 40px 20px; }
+            .chat-section { height: 500px; }
+            .user-bubble, .bot-bubble { max-width: 95%; }
         }
     </style>
 </head>
 <body>
-    <div class="container-fluid py-4">
-        <div class="row justify-content-center">
-            <div class="col-lg-10 col-xl-8">
-                <div class="main-container p-4">
-                    <div class="text-center mb-4">
-                        <h1 class="display-4 fw-bold">
-                            <i class="fas fa-file-pdf text-danger me-3"></i>
-                            PDF Q&A System
-                        </h1>
-                        <p class="lead text-muted">Upload a PDF document and ask questions about its content</p>
+    <div class="app-container">
+        <div class="header">
+            <h1>🤖 AI PDF Chat</h1>
+            <p>Upload your PDF and chat with it using AI</p>
+        </div>
+
+        <div class="content">
+            {% with messages = get_flashed_messages() %}
+                {% if messages %}
+                    {% for message in messages %}
+                        <div class="flash-message">{{ message }}</div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+
+            {% if not document_loaded %}
+            <div class="upload-section">
+                <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
+                    <div class="upload-area" onclick="document.getElementById('fileInput').click()">
+                        <div class="upload-icon">📄</div>
+                        <div class="upload-text">Drop your PDF here or click to browse</div>
+                        <div class="upload-subtext">Maximum file size: 16MB</div>
+                        <input type="file" name="file" accept=".pdf" class="file-input" id="fileInput" required>
                     </div>
+                    <button type="submit" class="btn">✨ Upload & Analyze</button>
+                </form>
+            </div>
+            {% endif %}
 
-                    <!-- Flash Messages -->
-                    {% with messages = get_flashed_messages() %}
-                        {% if messages %}
-                            {% for message in messages %}
-                                <div class="alert alert-info alert-dismissible fade show" role="alert">
-                                    <i class="fas fa-info-circle me-2"></i>{{ message }}
-                                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-                                </div>
-                            {% endfor %}
-                        {% endif %}
-                    {% endwith %}
-
-                    {% if not document_loaded %}
-                    <!-- File Upload Section -->
-                    <div class="card mb-4">
-                        <div class="card-header">
-                            <h5 class="mb-0"><i class="fas fa-upload me-2"></i>Upload PDF Document</h5>
-                        </div>
-                        <div class="card-body">
-                            <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
-                                <div class="file-upload-area">
-                                    <div class="mb-3">
-                                        <i class="fas fa-cloud-upload-alt fa-4x text-primary mb-3"></i>
-                                        <h5>Drag & Drop or Click to Upload</h5>
-                                        <p class="text-muted mb-3">Select a PDF file to analyze (Max 16MB)</p>
-                                    </div>
-                                    <input type="file" name="file" accept=".pdf" class="form-control mb-3" id="fileInput" required>
-                                    <button type="submit" class="btn btn-primary btn-lg">
-                                        <i class="fas fa-upload me-2"></i>Upload & Process PDF
-                                    </button>
-                                </div>
-                            </form>
-                        </div>
+            {% if document_loaded %}
+            <div class="chat-section">
+                <div class="document-info">
+                    <div class="doc-details">
+                        <h3><span class="status-dot"></span>{{ filename }}</h3>
+                        <p>Uploaded at {{ upload_time }} • {{ chunk_count }} sections processed</p>
                     </div>
+                    <button class="new-doc-btn" onclick="clearDocument()">📎 New Document</button>
+                </div>
 
-                    <!-- Features Section -->
-                    <div class="row text-center">
-                        <div class="col-md-4 mb-3">
-                            <div class="card h-100">
-                                <div class="card-body">
-                                    <i class="fas fa-search fa-2x text-primary mb-3"></i>
-                                    <h6>Smart Search</h6>
-                                    <p class="text-muted small">AI-powered semantic search through your documents</p>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-4 mb-3">
-                            <div class="card h-100">
-                                <div class="card-body">
-                                    <i class="fas fa-robot fa-2x text-success mb-3"></i>
-                                    <h6>AI Assistant</h6>
-                                    <p class="text-muted small">Get intelligent answers powered by Gemini AI</p>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-4 mb-3">
-                            <div class="card h-100">
-                                <div class="card-body">
-                                    <i class="fas fa-bolt fa-2x text-warning mb-3"></i>
-                                    <h6>Instant Results</h6>
-                                    <p class="text-muted small">Fast processing and real-time responses</p>
-                                </div>
-                            </div>
-                        </div>
+                <div class="chat-container" id="chatContainer">
+                    <div class="empty-state">
+                        <div class="empty-icon">💬</div>
+                        <h3>Ready to chat!</h3>
+                        <p>Ask me anything about your PDF document</p>
                     </div>
-                    {% endif %}
+                </div>
 
-                    {% if document_loaded %}
-                    <!-- Question-Answer Section -->
-                    <div class="card">
-                        <div class="card-header d-flex justify-content-between align-items-center">
-                            <h5 class="mb-0">
-                                <i class="fas fa-comments me-2"></i>Chat with: {{ filename }}
-                            </h5>
-                            <button class="btn btn-outline-light btn-sm" onclick="clearDocument()">
-                                <i class="fas fa-trash me-1"></i>Clear Document
-                            </button>
-                        </div>
-                        <div class="card-body">
-                            <!-- Chat Container -->
-                            <div id="chatContainer" class="chat-container mb-3">
-                                <div class="text-center text-muted">
-                                    <i class="fas fa-comments fa-2x mb-2"></i>
-                                    <p>Start by asking a question about your PDF document!</p>
-                                </div>
-                            </div>
+                <div id="loading" class="loading" style="display: none;">
+                    <div class="spinner"></div>
+                    <p>AI is thinking...</p>
+                </div>
 
-                            <!-- Question Input -->
-                            <div class="input-group">
-                                <input type="text" id="questionInput" class="form-control form-control-lg" 
-                                       placeholder="Ask a question about the PDF..." 
-                                       onkeypress="handleKeyPress(event)">
-                                <button class="btn btn-primary" onclick="askQuestion()">
-                                    <i class="fas fa-paper-plane"></i>
-                                </button>
-                            </div>
-
-                            <!-- Loading Indicator -->
-                            <div id="loading" class="loading mt-3">
-                                <div class="text-center">
-                                    <div class="spinner-border" role="status">
-                                        <span class="visually-hidden">Loading...</span>
-                                    </div>
-                                    <p class="mt-2 text-muted">Processing your question...</p>
-                                </div>
-                            </div>
-
-                            <!-- Example Questions -->
-                            <div class="mt-3">
-                                <small class="text-muted">Try asking:</small>
-                                <div class="mt-2">
-                                    <button class="btn btn-outline-secondary btn-sm me-2 mb-2" onclick="askSampleQuestion('What is this document about?')">
-                                        What is this document about?
-                                    </button>
-                                    <button class="btn btn-outline-secondary btn-sm me-2 mb-2" onclick="askSampleQuestion('Summarize the key points')">
-                                        Summarize the key points
-                                    </button>
-                                    <button class="btn btn-outline-secondary btn-sm me-2 mb-2" onclick="askSampleQuestion('What are the main requirements?')">
-                                        What are the main requirements?
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
+                <div class="input-section">
+                    <div class="input-container">
+                        <input type="text" id="questionInput" class="question-input" 
+                               placeholder="Ask anything about your document..." 
+                               onkeypress="handleKeyPress(event)">
+                        <button class="send-btn" onclick="askQuestion()">➤</button>
                     </div>
-                    {% endif %}
+                    
+                    <div class="suggestions">
+                        <button class="suggestion" onclick="askSampleQuestion('What is this document about?')">
+                            📋 What's this about?
+                        </button>
+                        <button class="suggestion" onclick="askSampleQuestion('Summarize the key points')">
+                            📝 Key points
+                        </button>
+                        <button class="suggestion" onclick="askSampleQuestion('Any important dates or deadlines?')">
+                            📅 Important dates
+                        </button>
+                    </div>
                 </div>
             </div>
+            {% endif %}
         </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         function handleKeyPress(event) {
-            if (event.key === 'Enter') {
+            if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
                 askQuestion();
             }
         }
@@ -280,7 +559,7 @@ HTML_TEMPLATE = """
             const question = questionInput.value.trim();
             
             if (!question) {
-                alert('Please enter a question');
+                showNotification('Please enter a question', 'warning');
                 return;
             }
 
@@ -298,30 +577,36 @@ HTML_TEMPLATE = """
             .then(data => {
                 document.getElementById('loading').style.display = 'none';
                 questionInput.disabled = false;
+                questionInput.focus();
+                
                 if (data.success) {
                     addResponseToChat(data.response);
                 } else {
-                    addMessageToChat(`Error: ${data.error}`, 'bot');
+                    addErrorToChat(data.error);
                 }
             })
             .catch(error => {
                 document.getElementById('loading').style.display = 'none';
                 questionInput.disabled = false;
-                addMessageToChat(`Error: ${error.message}`, 'bot');
+                questionInput.focus();
+                addErrorToChat('Network error: ' + error.message);
             });
         }
 
         function addMessageToChat(message, sender) {
             const chatContainer = document.getElementById('chatContainer');
             
-            // Clear the initial message if it exists
-            if (chatContainer.querySelector('.text-center')) {
+            if (chatContainer.querySelector('.empty-state')) {
                 chatContainer.innerHTML = '';
             }
             
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${sender}-message`;
-            messageDiv.innerHTML = `<strong>${sender === 'user' ? 'You' : 'AI Assistant'}:</strong><br>${message}`;
+            
+            if (sender === 'user') {
+                messageDiv.innerHTML = `<div class="user-bubble">${message}</div>`;
+            }
+            
             chatContainer.appendChild(messageDiv);
             chatContainer.scrollTop = chatContainer.scrollHeight;
         }
@@ -329,41 +614,79 @@ HTML_TEMPLATE = """
         function addResponseToChat(response) {
             const chatContainer = document.getElementById('chatContainer');
             
-            // Clear the initial message if it exists
-            if (chatContainer.querySelector('.text-center')) {
-                chatContainer.innerHTML = '';
-            }
-            
             const messageDiv = document.createElement('div');
             messageDiv.className = 'message bot-message';
             
-            let responseHtml = '<strong>AI Assistant:</strong><br>';
-            responseHtml += `<div class="mt-2">`;
-            responseHtml += `<strong>Decision:</strong> <span class="badge bg-primary">${response.decision}</span><br>`;
-            if (response.amount && response.amount !== 'null') {
-                responseHtml += `<strong>Amount:</strong> ${response.amount}<br>`;
+            const decision = response.decision || 'Unknown';
+            const amount = response.amount && response.amount !== 'null' ? response.amount : null;
+            const justification = response.justification || 'No explanation provided.';
+            
+            let badgeClass = 'unknown';
+            if (decision.toLowerCase().includes('covered') && !decision.toLowerCase().includes('not')) {
+                badgeClass = decision.toLowerCase().includes('partially') ? 'partial' : 'covered';
+            } else if (decision.toLowerCase().includes('not covered')) {
+                badgeClass = 'not-covered';
             }
-            responseHtml += `<strong>Explanation:</strong><br>${response.justification}`;
-            responseHtml += `</div>`;
+            
+            let responseHtml = `
+                <div class="bot-bubble">
+                    <div class="decision-badge ${badgeClass}">${decision}</div>
+                    ${amount ? `<div style="margin-bottom: 10px; font-weight: 600; color: #667eea;">${amount}</div>` : ''}
+                    <div>${justification}</div>
+                </div>
+            `;
             
             messageDiv.innerHTML = responseHtml;
             chatContainer.appendChild(messageDiv);
             chatContainer.scrollTop = chatContainer.scrollHeight;
         }
 
+        function addErrorToChat(error) {
+            const chatContainer = document.getElementById('chatContainer');
+            
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message bot-message';
+            messageDiv.innerHTML = `
+                <div class="bot-bubble" style="border-left: 4px solid #ef4444;">
+                    <div style="color: #ef4444; font-weight: 600; margin-bottom: 10px;">❌ Error</div>
+                    <div>${error}</div>
+                </div>
+            `;
+            
+            chatContainer.appendChild(messageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
         function clearDocument() {
-            if (confirm('Are you sure you want to clear the current document?')) {
+            if (confirm('Upload a new document? This will clear the current conversation.')) {
                 fetch('/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
                 .then(response => response.json())
                 .then(data => {
-                    if (data.success) location.reload();
-                    else alert(`Error: ${data.error}`);
+                    if (data.success) {
+                        showNotification('Document cleared!', 'success');
+                        setTimeout(() => location.reload(), 1000);
+                    } else {
+                        showNotification('Error: ' + data.error, 'error');
+                    }
                 })
-                .catch(error => alert(`Error: ${error.message}`));
+                .catch(error => showNotification('Error: ' + error.message, 'error'));
             }
         }
 
-        // File upload enhancements
+        function showNotification(message, type) {
+            const notification = document.createElement('div');
+            notification.className = `notification ${type}`;
+            notification.textContent = message;
+            
+            document.body.appendChild(notification);
+            
+            setTimeout(() => {
+                notification.style.animation = 'slideIn 0.3s ease-out reverse';
+                setTimeout(() => notification.remove(), 300);
+            }, 3000);
+        }
+
+        // File upload handling
         document.addEventListener('DOMContentLoaded', function() {
             const fileInput = document.getElementById('fileInput');
             const uploadForm = document.getElementById('uploadForm');
@@ -373,23 +696,32 @@ HTML_TEMPLATE = """
                     const file = this.files[0];
                     if (file) {
                         if (file.type !== 'application/pdf') {
-                            alert('Please select a PDF file');
+                            showNotification('Please select a PDF file', 'warning');
                             this.value = '';
                             return;
                         }
                         if (file.size > 16 * 1024 * 1024) {
-                            alert('File size must be less than 16MB');
+                            showNotification('File size must be less than 16MB', 'warning');
                             this.value = '';
                             return;
                         }
+                        
+                        // Auto-submit form when file is selected
+                        uploadForm.submit();
                     }
                 });
                 
                 uploadForm.addEventListener('submit', function() {
-                    const submitBtn = this.querySelector('button[type="submit"]');
-                    submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Processing...';
+                    const submitBtn = this.querySelector('.btn');
+                    submitBtn.innerHTML = '⏳ Processing...';
                     submitBtn.disabled = true;
                 });
+            }
+            
+            // Focus on question input if document is loaded
+            const questionInput = document.getElementById('questionInput');
+            if (questionInput) {
+                questionInput.focus();
             }
         });
     </script>
@@ -399,9 +731,18 @@ HTML_TEMPLATE = """
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE, 
-                                document_loaded=current_document['chunks'] is not None,
-                                filename=current_document['filename'])
+    # Add cache-busting headers
+    response = app.response_class(
+        render_template_string(HTML_TEMPLATE, 
+                              document_loaded=current_document['chunks'] is not None,
+                              filename=current_document['filename'],
+                              upload_time=current_document.get('upload_time', 'Unknown'),
+                              chunk_count=current_document.get('chunk_count', 0))
+    )
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -415,12 +756,36 @@ def upload_file():
             flash('Please upload a valid PDF file')
             return redirect(url_for('index'))
         
-        # Save file to temporary location
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
-            file.save(temp_file.name)
+        # Clear previous document first
+        current_document.update({
+            'chunks': None,
+            'embeddings': None,
+            'index': None,
+            'model_st': None,
+            'filename': None,
+            'upload_time': None,
+            'chunk_count': 0
+        })
+        
+        # Save file to temporary location and process it
+        temp_file_path = None
+        try:
+            # Create temporary file
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+            temp_file_path = temp_file.name
             
-            # Process the PDF
-            text = extract_text_from_pdf(temp_file.name)
+            # Save the uploaded file
+            file.save(temp_file_path)
+            temp_file.close()  # Explicitly close the file
+            
+            # Add a small delay to ensure file is released
+            time.sleep(0.1)
+            gc.collect()  # Force garbage collection
+            
+            print(f"Processing new PDF: {file.filename}")  # Debug log
+            
+            # Process the PDF (file is now closed and released)
+            text = extract_text_from_pdf(temp_file_path)
             chunks, embeddings, index, model_st = create_document_embeddings(text)
             
             # Store in global variables
@@ -429,14 +794,35 @@ def upload_file():
                 'embeddings': embeddings,
                 'index': index,
                 'model_st': model_st,
-                'filename': secure_filename(file.filename)
+                'filename': secure_filename(file.filename),
+                'upload_time': time.strftime('%H:%M:%S'),
+                'chunk_count': len(chunks)
             })
             
-            # Clean up temp file
-            os.unlink(temp_file.name)
+            print(f"Successfully processed PDF: {file.filename} with {len(chunks)} chunks")  # Debug log
             
-        flash(f'✅ PDF "{file.filename}" uploaded and processed successfully! You can now ask questions.')
-        return redirect(url_for('index'))
+            flash(f'✅ PDF "{file.filename}" uploaded and processed successfully! Ready for AI analysis with {len(chunks)} text sections.')
+            return redirect(url_for('index'))
+            
+        finally:
+            # Clean up temp file safely with retry mechanism
+            if temp_file_path and os.path.exists(temp_file_path):
+                max_retries = 5
+                for attempt in range(max_retries):
+                    try:
+                        time.sleep(0.1 * (attempt + 1))  # Increasing delay
+                        os.unlink(temp_file_path)
+                        break  # Success, exit retry loop
+                    except PermissionError as e:
+                        if attempt == max_retries - 1:
+                            print(f"Warning: Could not delete temp file after {max_retries} attempts: {temp_file_path}")
+                            # File will be cleaned up by system temp folder cleanup
+                        else:
+                            print(f"Retry {attempt + 1}/{max_retries} to delete temp file: {e}")
+                            gc.collect()  # Force garbage collection between retries
+                    except Exception as cleanup_error:
+                        print(f"Warning: Unexpected error deleting temp file {temp_file_path}: {cleanup_error}")
+                        break
         
     except Exception as e:
         flash(f'❌ Error processing file: {str(e)}')
@@ -455,6 +841,10 @@ def ask_question():
         if current_document['chunks'] is None:
             return jsonify({'error': 'Please upload a PDF first'}), 400
         
+        print(f"Answering question for PDF: {current_document['filename']}")  # Debug log
+        print(f"Question: {question}")  # Debug log
+        print(f"Using {len(current_document['chunks'])} chunks from document")  # Debug log
+        
         # Generate response
         response = generate_response(
             question, 
@@ -467,6 +857,11 @@ def ask_question():
         # Parse the JSON response
         try:
             response_data = json.loads(response)
+            # Add document info to response for debugging
+            response_data['_debug_info'] = {
+                'document': current_document['filename'],
+                'chunks_count': len(current_document['chunks'])
+            }
             return jsonify({'success': True, 'response': response_data})
         except json.JSONDecodeError:
             return jsonify({
@@ -474,7 +869,11 @@ def ask_question():
                 'response': {
                     'decision': 'Response received',
                     'amount': None,
-                    'justification': response
+                    'justification': response,
+                    '_debug_info': {
+                        'document': current_document['filename'],
+                        'chunks_count': len(current_document['chunks'])
+                    }
                 }
             })
             
@@ -487,11 +886,22 @@ def clear_document():
     try:
         current_document.update({
             'chunks': None, 'embeddings': None, 'index': None, 
-            'model_st': None, 'filename': None
+            'model_st': None, 'filename': None, 'upload_time': None, 'chunk_count': 0
         })
         return jsonify({'success': True, 'message': 'Document cleared successfully'})
     except Exception as e:
         return jsonify({'error': f'Error clearing document: {str(e)}'}), 500
+
+@app.route('/status')
+def get_status():
+    """Endpoint to check current document status"""
+    return jsonify({
+        'document_loaded': current_document['chunks'] is not None,
+        'filename': current_document['filename'],
+        'chunks_count': len(current_document['chunks']) if current_document['chunks'] else 0,
+        'upload_time': current_document.get('upload_time', None),
+        'model_ready': current_document['model_st'] is not None
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

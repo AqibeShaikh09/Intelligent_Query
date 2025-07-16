@@ -7,7 +7,7 @@ services:
     startCommand: "./start.sh"
     healthCheckPath: /
     envVars:
-      - key: GEMINI_API_KEY
+      - key: OPENROUTER_API_KEY
         sync: false
       - key: SECRET_KEY
         generateValue: true

@@ -4,7 +4,7 @@ import faiss
 import numpy as np
 from transformers import pipeline
 import json
-import google.generativeai as genai
+import openai
 import os
 from dotenv import load_dotenv
 
@@ -24,7 +24,36 @@ def extract_text_from_pdf(pdf_path):
 # Step 2: Text Chunking and Embedding
 def create_document_embeddings(text):
     model = SentenceTransformer('all-MiniLM-L6-v2')
-    chunks = text.split("\n\n")  # Split into paragraphs
+    
+    # Split into smaller chunks to manage token limits better
+    # First split by paragraphs, then further split if needed
+    paragraphs = text.split("\n\n")
+    chunks = []
+    
+    for paragraph in paragraphs:
+        # If paragraph is too long, split it into smaller chunks
+        if len(paragraph) > 800:
+            # Split long paragraphs into sentences and group them
+            sentences = paragraph.split(". ")
+            current_chunk = ""
+            
+            for sentence in sentences:
+                if len(current_chunk + sentence) < 800:
+                    current_chunk += sentence + ". "
+                else:
+                    if current_chunk.strip():
+                        chunks.append(current_chunk.strip())
+                    current_chunk = sentence + ". "
+            
+            if current_chunk.strip():
+                chunks.append(current_chunk.strip())
+        else:
+            if paragraph.strip():
+                chunks.append(paragraph.strip())
+    
+    # Filter out very short chunks
+    chunks = [chunk for chunk in chunks if len(chunk) > 50]
+    
     embeddings = model.encode(chunks)
     
     # Create FAISS index
@@ -48,45 +77,85 @@ def parse_query(query):
     return parsed
 
 # Step 4: Semantic Retrieval
-def retrieve_relevant_chunks(query, chunks, embeddings, index, model, k=3):
+def retrieve_relevant_chunks(query, chunks, embeddings, index, model, k=2):
     query_embedding = model.encode([query])[0]
     distances, indices = index.search(np.array([query_embedding]), k)
-    return [chunks[i] for i in indices[0]]
+    # Limit chunk size to prevent token overflow
+    relevant_chunks = []
+    for i in indices[0]:
+        chunk = chunks[i]
+        # Limit each chunk to 500 characters to stay within token limits
+        if len(chunk) > 500:
+            chunk = chunk[:500] + "..."
+        relevant_chunks.append(chunk)
+    return relevant_chunks
 
 # Step 5: Decision and Output Generation
-def generate_response(query, chunks, embeddings=None, index=None, model_st=None, llm_model="gemini-1.5-flash"):
-    # Configure Gemini API
-    genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
-    model = genai.GenerativeModel(llm_model)
+def generate_response(query, chunks, embeddings=None, index=None, model_st=None, llm_model="anthropic/claude-3-haiku"):
+    # Configure OpenRouter API using new OpenAI client
+    from openai import OpenAI
+    
+    client = OpenAI(
+        api_key=os.getenv('OPENROUTER_API_KEY'),
+        base_url="https://openrouter.ai/api/v1"
+    )
     
     parsed_query = parse_query(query)
     relevant_chunks = retrieve_relevant_chunks(query, chunks, embeddings, index, model_st)
     
     # Construct prompt for LLM
-    prompt = f"""Based on the following insurance policy document chunks, answer the user's query in JSON format.
+    prompt = f"""Based on these document excerpts, answer the query in JSON format.
 
 Query: {query}
 
-Relevant Document Chunks:
-{chr(10).join([f"Chunk {i+1}: {chunk}" for i, chunk in enumerate(relevant_chunks)])}
+Document excerpts:
+{chr(10).join([f"{i+1}. {chunk}" for i, chunk in enumerate(relevant_chunks)])}
 
-Please provide your response in the following JSON format:
+Response format:
 {{
-    "decision": "Covered" or "Not Covered" or "Partially Covered",
-    "amount": "maximum coverage amount if applicable, otherwise null",
-    "justification": "detailed explanation based on the document chunks"
+    "decision": "Covered/Not Covered/Partially Covered/Unable to determine",
+    "amount": "coverage amount or null",
+    "justification": "brief explanation based on excerpts"
 }}
 
-Only base your answer on the information provided in the document chunks. If the information is not sufficient to make a determination, state that clearly in the justification."""
+Base answer only on provided excerpts."""
+    
+    # Estimate token count (rough approximation: 1 token ≈ 4 characters)
+    estimated_tokens = len(prompt) // 4
+    print(f"Estimated prompt tokens: {estimated_tokens}")
+    
+    # If prompt is too long, use only the first chunk
+    if estimated_tokens > 8000:  # Conservative limit for free tier
+        print("Prompt too long, using only first chunk")
+        relevant_chunks = relevant_chunks[:1]
+        # Recreate shorter prompt
+        prompt = f"""Based on this document excerpt, answer in JSON format.
+
+Query: {query}
+
+Excerpt: {relevant_chunks[0][:300]}...
+
+Format: {{"decision": "...", "amount": "...", "justification": "..."}}"""
 
     try:
-        # Generate response using Gemini
-        response = model.generate_content(prompt)
+        # Generate response using OpenRouter with new API
+        response = client.chat.completions.create(
+            model=llm_model,
+            messages=[
+                {"role": "system", "content": "You are an AI assistant that analyzes documents and provides JSON responses."},
+                {"role": "user", "content": prompt}
+            ],
+            extra_headers={
+                "HTTP-Referer": "http://localhost:5000",
+                "X-Title": "PDF Q&A System"
+            }
+        )
+        
+        response_text = response.choices[0].message.content
         
         # Try to parse as JSON, if it fails, format it properly
         try:
             # Extract JSON from response if it's wrapped in markdown
-            response_text = response.text
             if "```json" in response_text:
                 json_start = response_text.find("```json") + 7
                 json_end = response_text.find("```", json_start)
@@ -104,7 +173,7 @@ Only base your answer on the information provided in the document chunks. If the
             return json.dumps({
                 "decision": "Unable to determine",
                 "amount": None,
-                "justification": f"LLM Response: {response.text}"
+                "justification": f"AI Response: {response_text}"
             }, indent=2)
             
     except Exception as e:
@@ -136,7 +205,7 @@ def interactive_qa_session(chunks, embeddings, index, model_st):
             
             # Process the query
             print("\n🔍 Processing your question...")
-            response = generate_response(user_query, chunks)
+            response = generate_response(user_query, chunks, embeddings, index, model_st)
             
             # Display the response
             print("\n📋 Response:")
@@ -165,16 +234,22 @@ def interactive_qa_session(chunks, embeddings, index, model_st):
 if __name__ == "__main__":
     print("🚀 Starting PDF Analysis System...")
     
-    # Load and process PDF
-    pdf_path = "EDLHLGA23009V012223.pdf"
+    # Get PDF file path from user
+    while True:
+        pdf_path = input("\n📁 Enter the path to your PDF file (or drag and drop the file here): ").strip().strip('"')
+        
+        if os.path.exists(pdf_path) and pdf_path.lower().endswith('.pdf'):
+            break
+        else:
+            print("❌ File not found or not a PDF file. Please try again.")
+            print("Make sure to provide the full path to your PDF file.")
     
     try:
-        print("📖 Extracting text from PDF...")
+        print(f"📖 Extracting text from PDF: {os.path.basename(pdf_path)}...")
         text = extract_text_from_pdf(pdf_path)
         
         print("🧠 Creating document embeddings...")
-        chunks, embeddings, index = create_document_embeddings(text)
-        model_st = SentenceTransformer('all-MiniLM-L6-v2')
+        chunks, embeddings, index, model_st = create_document_embeddings(text)
         
         print("✅ PDF processing complete!")
         
@@ -192,13 +267,13 @@ if __name__ == "__main__":
             # Run test query
             print("\n🧪 Running test query...")
             query = "Is routine preventive care covered for a mother who has just delivered a newborn under this policy?"
-            response = generate_response(query, chunks)
+            response = generate_response(query, chunks, embeddings, index, model_st)
             print("\n📋 Test Response:")
             print(response)
             
     except FileNotFoundError:
-        print(f"❌ Error: PDF file '{pdf_path}' not found!")
-        print("Please make sure the PDF file exists in the current directory.")
+        print(f"❌ Error: PDF file '{os.path.basename(pdf_path)}' not found!")
+        print("Please make sure the PDF file exists and the path is correct.")
     except Exception as e:
         print(f"❌ An error occurred during PDF processing: {str(e)}")
-        print("Please check your setup and try again.")
+        print("Please check your PDF file and try again.")
