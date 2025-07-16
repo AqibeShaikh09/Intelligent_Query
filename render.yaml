@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: pdf-qa-system
+    env: python
+    plan: free
+    buildCommand: "./build.sh"
+    startCommand: "./start.sh"
+    healthCheckPath: /
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: PYTHON_VERSION
+        value: 3.9.18
