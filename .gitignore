@@ -43,3 +43,18 @@ uploads/
 
 # Logs
 *.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Ngrok
+ngrok.exe
+*.ngrok-free.app
+
+# Local development
+.vscode/settings.json
+*.local
+
+# Cache
+.cache/
