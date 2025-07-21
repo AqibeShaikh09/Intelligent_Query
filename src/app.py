@@ -11,6 +11,25 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+def get_api_key():
+    """
+    Get API key with fallback support for different naming conventions
+    Supports both OPENROUTER_API_KEY and OPENAI_API_KEY for backward compatibility
+    """
+    # Primary key name (preferred)
+    api_key = os.getenv('OPENROUTER_API_KEY')
+    if api_key:
+        return api_key
+    
+    # Fallback key name for backward compatibility
+    api_key = os.getenv('OPENAI_API_KEY')
+    if api_key:
+        print("⚠️  Using OPENAI_API_KEY - Consider renaming to OPENROUTER_API_KEY")
+        return api_key
+    
+    # No key found
+    raise ValueError("❌ No API key found! Please set OPENROUTER_API_KEY in your .env file")
+
 # Step 1: Document Ingestion
 def extract_text_from_pdf(pdf_path):
     with pdfplumber.open(pdf_path) as pdf:
@@ -95,10 +114,19 @@ def generate_response(query, chunks, embeddings=None, index=None, model_st=None,
     # Configure OpenRouter API using new OpenAI client
     from openai import OpenAI
     
-    client = OpenAI(
-        api_key=os.getenv('OPENROUTER_API_KEY'),
-        base_url="https://openrouter.ai/api/v1"
-    )
+    try:
+        api_key = get_api_key()
+        client = OpenAI(
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1"
+        )
+    except ValueError as e:
+        print(f"API Key Error: {e}")
+        return json.dumps({
+            "answer": "❌ API key not configured. Please set OPENROUTER_API_KEY in your .env file.",
+            "justification": "Cannot process query without API key.",
+            "confidence": 0.0
+        })
     
     parsed_query = parse_query(query)
     relevant_chunks = retrieve_relevant_chunks(query, chunks, embeddings, index, model_st)

@@ -2,11 +2,99 @@ from flask import Flask, request, jsonify, render_template_string, flash, redire
 from werkzeug.utils import secure_filename
 import os
 import json
-from .app import extract_text_from_pdf, create_document_embeddings, generate_response
+import sys
 import tempfile
 import traceback
 import time
 import gc
+
+# Smart import handling for different deployment scenarios
+def import_app_module():
+    """Dynamic import handler for app.py that works in all environments"""
+    try:
+        # Method 1: Try relative import (when running as package)
+        from .app import extract_text_from_pdf, create_document_embeddings, generate_response
+        return extract_text_from_pdf, create_document_embeddings, generate_response
+    except (ImportError, ValueError):
+        try:
+            # Method 2: Try direct import (when running standalone)
+            from app import extract_text_from_pdf, create_document_embeddings, generate_response
+            return extract_text_from_pdf, create_document_embeddings, generate_response
+        except ImportError:
+            try:
+                # Method 3: Add current directory to path and import
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                if current_dir not in sys.path:
+                    sys.path.insert(0, current_dir)
+                from app import extract_text_from_pdf, create_document_embeddings, generate_response
+                return extract_text_from_pdf, create_document_embeddings, generate_response
+            except ImportError:
+                # Method 4: Absolute path import (fallback)
+                import importlib.util
+                app_file = os.path.join(os.path.dirname(__file__), 'app.py')
+                if not os.path.exists(app_file):
+                    raise ImportError(f"Could not find app.py at {app_file}")
+                
+                spec = importlib.util.spec_from_file_location("app_module", app_file)
+                app_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(app_module)
+                
+                return (app_module.extract_text_from_pdf, 
+                       app_module.create_document_embeddings, 
+                       app_module.generate_response)
+
+# Import the required functions
+try:
+    extract_text_from_pdf, create_document_embeddings, generate_response = import_app_module()
+    print("✅ Successfully imported app module functions")
+except Exception as import_error:
+    print(f"❌ Failed to import app module: {import_error}")
+    print("Please ensure app.py is in the same directory as web_app.py")
+    sys.exit(1)
+
+def get_api_key():
+    """
+    Get API key with fallback mechanism for backward compatibility
+    Supports both OPENROUTER_API_KEY and OPENAI_API_KEY
+    """
+    # Primary: OpenRouter API key (preferred)
+    api_key = os.environ.get('OPENROUTER_API_KEY')
+    if api_key:
+        return api_key, 'OPENROUTER_API_KEY'
+    
+    # Fallback: OpenAI API key (for backward compatibility)
+    api_key = os.environ.get('OPENAI_API_KEY')
+    if api_key:
+        print("⚠️  WARNING: Using OPENAI_API_KEY. Consider renaming to OPENROUTER_API_KEY")
+        return api_key, 'OPENAI_API_KEY'
+    
+    return None, None
+
+def validate_api_configuration():
+    """Validate API configuration at startup"""
+    api_key, key_source = get_api_key()
+    
+    if not api_key:
+        print("❌ No API key found!")
+        print("   Please set one of the following environment variables:")
+        print("   - OPENROUTER_API_KEY (recommended)")
+        print("   - OPENAI_API_KEY (for backward compatibility)")
+        print("   Check your .env file or environment variables")
+        return False
+    
+    print(f"✅ API key found: {key_source}")
+    
+    # Validate key format
+    if not api_key.startswith(('sk-', 'or-')):
+        print(f"⚠️  WARNING: API key format unusual (should start with 'sk-' or 'or-')")
+    
+    return True
+
+# Validate API configuration at startup
+if not validate_api_configuration():
+    print("💡 HINT: Create a .env file with:")
+    print("   OPENROUTER_API_KEY=your_actual_api_key_here")
+    print("\n🔄 Application will continue but AI features may not work")
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
@@ -845,9 +933,17 @@ def ask_question():
         if current_document['chunks'] is None:
             return jsonify({'error': 'Please upload a PDF first'}), 400
         
+        # Check API key before processing
+        api_key, key_source = get_api_key()
+        if not api_key:
+            return jsonify({
+                'error': 'No API key configured. Please set OPENROUTER_API_KEY in your .env file.'
+            }), 500
+        
         print(f"Answering question for PDF: {current_document['filename']}")  # Debug log
         print(f"Question: {question}")  # Debug log
         print(f"Using {len(current_document['chunks'])} chunks from document")  # Debug log
+        print(f"API Key source: {key_source}")  # Debug log
         
         # Generate response
         response = generate_response(
@@ -864,7 +960,8 @@ def ask_question():
             # Add document info to response for debugging
             response_data['_debug_info'] = {
                 'document': current_document['filename'],
-                'chunks_count': len(current_document['chunks'])
+                'chunks_count': len(current_document['chunks']),
+                'api_key_source': key_source
             }
             return jsonify({'success': True, 'response': response_data})
         except json.JSONDecodeError:
@@ -876,14 +973,35 @@ def ask_question():
                     'justification': response,
                     '_debug_info': {
                         'document': current_document['filename'],
-                        'chunks_count': len(current_document['chunks'])
+                        'chunks_count': len(current_document['chunks']),
+                        'api_key_source': key_source
                     }
                 }
             })
             
     except Exception as e:
-        print(f"Question processing error: {traceback.format_exc()}")
-        return jsonify({'error': f'Error processing question: {str(e)}'}), 500
+        error_msg = str(e).lower()
+        
+        # Provide specific error messages for common API issues
+        if 'api' in error_msg and 'key' in error_msg:
+            return jsonify({
+                'error': 'API key error. Please check your OPENROUTER_API_KEY in the .env file.'
+            }), 500
+        elif 'authentication' in error_msg or 'unauthorized' in error_msg:
+            return jsonify({
+                'error': 'Authentication failed. Please verify your API key is correct.'
+            }), 500
+        elif 'rate limit' in error_msg or 'quota' in error_msg:
+            return jsonify({
+                'error': 'API rate limit exceeded. Please try again later.'
+            }), 500
+        elif 'network' in error_msg or 'connection' in error_msg:
+            return jsonify({
+                'error': 'Network error. Please check your internet connection.'
+            }), 500
+        else:
+            print(f"Question processing error: {traceback.format_exc()}")
+            return jsonify({'error': f'Error processing question: {str(e)}'}), 500
 
 @app.route('/clear', methods=['POST'])
 def clear_document():
@@ -898,14 +1016,50 @@ def clear_document():
 
 @app.route('/status')
 def get_status():
-    """Endpoint to check current document status"""
+    """Endpoint to check current document and API status"""
+    api_key, key_source = get_api_key()
+    
     return jsonify({
         'document_loaded': current_document['chunks'] is not None,
         'filename': current_document['filename'],
         'chunks_count': len(current_document['chunks']) if current_document['chunks'] else 0,
         'upload_time': current_document.get('upload_time', None),
-        'model_ready': current_document['model_st'] is not None
+        'model_ready': current_document['model_st'] is not None,
+        'api_configured': api_key is not None,
+        'api_key_source': key_source,
+        'api_key_preview': f"{api_key[:8]}..." if api_key else None,
+        'system_ready': api_key is not None and current_document['chunks'] is not None
     })
+
+@app.route('/test-api')
+def test_api():
+    """Test API key configuration"""
+    try:
+        api_key, key_source = get_api_key()
+        
+        if not api_key:
+            return jsonify({
+                'success': False,
+                'error': 'No API key configured',
+                'help': 'Set OPENROUTER_API_KEY in your .env file'
+            }), 400
+        
+        # Basic format validation
+        valid_format = api_key.startswith(('sk-', 'or-'))
+        
+        return jsonify({
+            'success': True,
+            'api_key_source': key_source,
+            'api_key_preview': f"{api_key[:8]}..." if len(api_key) > 8 else "short_key",
+            'valid_format': valid_format,
+            'message': 'API key found and appears valid' if valid_format else 'API key found but format unusual'
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Error testing API: {str(e)}'
+        }), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

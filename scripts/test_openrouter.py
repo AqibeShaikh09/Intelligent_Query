@@ -11,9 +11,12 @@ load_dotenv()
 
 def test_openrouter_connection():
     try:
+        # Get API key with fallback support
+        api_key = os.getenv('OPENROUTER_API_KEY') or os.getenv('OPENAI_API_KEY')
+        
         # Initialize OpenRouter client
         client = OpenAI(
-            api_key=os.getenv('OPENROUTER_API_KEY'),
+            api_key=api_key,
             base_url="https://openrouter.ai/api/v1"
         )
         
@@ -44,10 +47,10 @@ if __name__ == "__main__":
     print("🚀 Testing OpenRouter API Integration")
     print("=" * 50)
     
-    # Check if API key is set
-    api_key = os.getenv('OPENROUTER_API_KEY')
+    # Check if API key is set (with fallback support)
+    api_key = os.getenv('OPENROUTER_API_KEY') or os.getenv('OPENAI_API_KEY')
     if not api_key:
-        print("❌ OPENROUTER_API_KEY not found in environment variables")
+        print("❌ No API key found (OPENROUTER_API_KEY or OPENAI_API_KEY)")
         print("Please check your .env file")
     elif api_key == "your_openrouter_api_key_here":
         print("❌ Please update your .env file with a real OpenRouter API key")

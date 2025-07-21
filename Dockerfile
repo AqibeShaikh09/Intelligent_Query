@@ -20,17 +20,22 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY src/ ./src/
-COPY requirements.txt .
+COPY docker_run.py .
 COPY .env.example .
-COPY docker-compose.yml .
 
 # Create uploads directory
 RUN mkdir -p uploads
 
-# Set environment variables
+# Set environment variables with proper Python path
+ENV PYTHONPATH="/app/src:/app:$PYTHONPATH"
 ENV FLASK_APP=src/web_app.py
 ENV FLASK_ENV=production
 ENV PYTHONUNBUFFERED=1
+
+# Create non-root user for security
+RUN useradd --create-home --shell /bin/bash appuser && \
+    chown -R appuser:appuser /app
+USER appuser
 
 # Expose port
 EXPOSE 5000
@@ -39,5 +44,5 @@ EXPOSE 5000
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:5000/status || exit 1
 
-# Run the application
-CMD ["python", "web_app.py"]
+# Run the application using the portable runner
+CMD ["python", "docker_run.py"]

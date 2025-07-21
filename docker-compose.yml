@@ -1,22 +1,39 @@
+version: '3.8'
+
+# This file defines your application's services.
+# To run, use the command: docker-compose up -d
+
 services:
   pdf-qa-app:
-    build: .
-    ports:
-      - "5000:5000"
-    environment:
-      - FLASK_ENV=production
-      - SECRET_KEY=${SECRET_KEY:-dev-secret-key-change-in-production}
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-    volumes:
-      - ./uploads:/app/uploads
-      - ./.env:/app/.env
+    # CHANGE 1: Use your pre-built image from Docker Hub.
+    image: sidd1969/pdf-qa-system:latest
+    container_name: pdf_qa_app
     restart: unless-stopped
+    ports:
+      # Maps port 80 on the host to port 5000 in the container.
+      # Ensure port 80 is open in your AWS Security Group for public access.
+      - "80:5000"
+    
+    # CHANGE 2: Use env_file to load your secrets. This is cleaner
+    # than mounting the file as a volume.
+    env_file:
+      - .env
+
+    # CHANGE 3: Add the crucial OPENAI_BASE_URL variable.
+    environment:
+      - OPENAI_BASE_URL=https://openrouter.ai/api/v1
+    
+    volumes:
+      # This volume is for persisting file uploads.
+      - ./uploads:/app/uploads
+      
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/status"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+      
     networks:
       - pdf-qa-network
 
