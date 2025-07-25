@@ -2,43 +2,46 @@ from flask import Flask, request, jsonify, render_template_string, flash, redire
 from werkzeug.utils import secure_filename
 import os
 import json
-from .app import extract_text_from_pdf, create_document_embeddings, generate_response
+from .app import extract_text_from_document, create_document_embeddings, generate_response
 import tempfile
 import traceback
 import time
 import gc
+import requests
+from urllib.parse import urlparse
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
 
-# Configuration
-ALLOWED_EXTENSIONS = {'pdf'}
-MAX_FILE_SIZE = 16 * 1024 * 1024  # 16MB max file size
+ALL_ALLOWED_EXTENSIONS = {'pdf', 'docx', 'eml'}
+MAX_FILE_SIZE = 16 * 1024 * 1024
 
 app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
 
-# Global variables to store processed document data
 current_document = {
     'chunks': None,
     'embeddings': None,
     'index': None,
     'model_st': None,
+    'source_url': None,
     'filename': None,
     'upload_time': None,
-    'chunk_count': 0
+    'chunk_count': 0,
+    'questions': [],
+    'answers': []
 }
 
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+def allowed_file_extension(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALL_ALLOWED_EXTENSIONS
 
-# HTML Template as string (for better performance)
+# HTML Template as string (Modified for simplified output and API endpoint)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI PDF Chat</title>
+    <title>AI Document API Test Client</title>
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         * {
@@ -117,59 +120,51 @@ HTML_TEMPLATE = """
             padding: 0;
         }
         
-        .upload-section {
+        .input-section {
             padding: 40px;
             text-align: center;
         }
         
-        .upload-area {
-            border: 3px dashed #e0e7ff;
-            border-radius: 15px;
-            padding: 60px 20px;
-            transition: all 0.3s ease;
-            cursor: pointer;
-            position: relative;
-            background: linear-gradient(145deg, #f8fafc 0%, #f1f5f9 100%);
-        }
-        
-        .upload-area:hover {
-            border-color: #667eea;
-            background: linear-gradient(145deg, #eef2ff 0%, #e0e7ff 100%);
-            transform: translateY(-2px);
-        }
-        
-        .upload-icon {
-            font-size: 4rem;
-            color: #667eea;
-            margin-bottom: 20px;
-            transition: all 0.3s ease;
-        }
-        
-        .upload-area:hover .upload-icon {
-            transform: scale(1.1);
-            color: #764ba2;
-        }
-        
-        .upload-text {
-            font-size: 1.2rem;
-            color: #4a5568;
-            margin-bottom: 10px;
-            font-weight: 500;
-        }
-        
-        .upload-subtext {
-            color: #718096;
-            font-size: 0.9rem;
-        }
-        
-        .file-input {
-            position: absolute;
-            top: 0;
-            left: 0;
+        textarea {
             width: 100%;
-            height: 100%;
-            opacity: 0;
-            cursor: pointer;
+            height: 300px;
+            padding: 15px;
+            border: 2px solid #e0e7ff;
+            border-radius: 15px;
+            font-family: 'Poppins', sans-serif;
+            font-size: 0.95rem;
+            color: #4a5568;
+            background-color: #f8fafc;
+            resize: vertical;
+            outline: none;
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+            box-shadow: inset 0 2px 4px rgba(0,0,0,0.05);
+        }
+
+        textarea:focus {
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .input-group {
+            margin-bottom: 15px;
+            text-align: left;
+        }
+
+        .input-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+            color: #4a5568;
+        }
+
+        .input-group input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #e0e7ff;
+            border-radius: 8px;
+            font-family: 'Poppins', sans-serif;
+            font-size: 0.9rem;
         }
         
         .btn {
@@ -191,7 +186,8 @@ HTML_TEMPLATE = """
         }
         
         .chat-section {
-            height: 600px;
+            height: auto;
+            min-height: 400px;
             display: flex;
             flex-direction: column;
         }
@@ -251,149 +247,36 @@ HTML_TEMPLATE = """
             transform: scale(1.05);
         }
         
-        .chat-container {
+        .output-container {
             flex: 1;
             overflow-y: auto;
             padding: 20px;
             background: #fafafa;
         }
-        
-        .chat-container::-webkit-scrollbar {
-            width: 6px;
-        }
-        
-        .chat-container::-webkit-scrollbar-thumb {
-            background: #cbd5e1;
-            border-radius: 3px;
-        }
-        
-        .message {
-            margin-bottom: 20px;
-            animation: messageSlide 0.4s ease-out;
-        }
-        
-        @keyframes messageSlide {
-            from { opacity: 0; transform: translateY(20px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        
-        .user-message {
-            text-align: right;
-        }
-        
-        .user-bubble {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 15px 20px;
-            border-radius: 20px 20px 5px 20px;
-            display: inline-block;
-            max-width: 80%;
-            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
-        }
-        
-        .bot-message {
-            text-align: left;
-        }
-        
-        .bot-bubble {
-            background: white;
-            color: #2d3748;
+
+        .output-json-block {
+            background: #2d3748;
+            color: #f7fafc;
             padding: 20px;
-            border-radius: 20px 20px 20px 5px;
-            display: inline-block;
-            max-width: 85%;
-            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
-            border: 1px solid #e2e8f0;
-        }
-        
-        .decision-badge {
-            padding: 6px 12px;
-            border-radius: 12px;
-            font-size: 0.8rem;
-            font-weight: 600;
-            margin-bottom: 10px;
-            display: inline-block;
-        }
-        
-        .covered { background: #dcfce7; color: #166534; }
-        .not-covered { background: #fef2f2; color: #991b1b; }
-        .partial { background: #fef3c7; color: #92400e; }
-        .unknown { background: #f3f4f6; color: #374151; }
-        
-        .input-section {
-            padding: 20px;
-            background: white;
-            border-top: 1px solid #e2e8f0;
-        }
-        
-        .input-container {
-            display: flex;
-            gap: 10px;
-            align-items: center;
-        }
-        
-        .question-input {
-            flex: 1;
-            padding: 15px 20px;
-            border: 2px solid #e2e8f0;
-            border-radius: 25px;
-            font-size: 1rem;
-            outline: none;
-            transition: all 0.3s ease;
-        }
-        
-        .question-input:focus {
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-        }
-        
-        .send-btn {
-            width: 50px;
-            height: 50px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            border-radius: 50%;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1.2rem;
-        }
-        
-        .send-btn:hover {
-            transform: scale(1.1);
-            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
-        }
-        
-        .suggestions {
-            margin-top: 15px;
-            text-align: center;
-        }
-        
-        .suggestion {
-            background: #f1f5f9;
-            color: #475569;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 20px;
-            margin: 5px;
-            cursor: pointer;
-            transition: all 0.3s ease;
+            border-radius: 10px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            white-space: pre-wrap;
+            word-break: break-all;
             font-size: 0.9rem;
+            text-align: left;
+            overflow-x: auto;
         }
-        
-        .suggestion:hover {
-            background: #667eea;
-            color: white;
-            transform: translateY(-1px);
+
+        .output-json-block pre {
+            margin: 0;
+            padding: 0;
         }
         
         .loading {
             text-align: center;
             padding: 20px;
             color: #64748b;
+            display: none;
         }
         
         .spinner {
@@ -457,17 +340,16 @@ HTML_TEMPLATE = """
         @media (max-width: 768px) {
             .app-container { margin: 10px; }
             .header h1 { font-size: 2rem; }
-            .upload-area { padding: 40px 20px; }
-            .chat-section { height: 500px; }
-            .user-bubble, .bot-bubble { max-width: 95%; }
+            .input-section { padding: 20px; }
+            .chat-section { height: auto; min-height: 400px; }
         }
     </style>
 </head>
 <body>
     <div class="app-container">
         <div class="header">
-            <h1>🤖 AI PDF Chat</h1>
-            <p>Upload your PDF and chat with it using AI</p>
+            <h1>🤖 AI Document API Test Client</h1>
+            <p>Interact with your AI Document Analysis API</p>
         </div>
 
         <div class="content">
@@ -479,16 +361,35 @@ HTML_TEMPLATE = """
                 {% endif %}
             {% endwith %}
 
+            <div id="loading" class="loading" style="display: none;">
+                <div class="spinner"></div>
+                <p>AI is processing your document and questions...</p>
+            </div>
+
             {% if not document_loaded %}
-            <div class="upload-section">
-                <form action="/upload" method="post" enctype="multipart/form-data" id="uploadForm">
-                    <div class="upload-area" onclick="document.getElementById('fileInput').click()">
-                        <div class="upload-icon">📄</div>
-                        <div class="upload-text">Drop your PDF here or click to browse</div>
-                        <div class="upload-subtext">Maximum file size: 16MB</div>
-                        <input type="file" name="file" accept=".pdf" class="file-input" id="fileInput" required>
+            <div class="input-section">
+                <form onsubmit="submitApiRequest(event)" id="jsonForm"> {# Changed function name #}
+                    <div class="input-group">
+                        <label for="baseUrlInput">API Base URL:</label>
+                        <input type="text" id="baseUrlInput" value="http://localhost:5000" placeholder="e.g., http://localhost:5000">
                     </div>
-                    <button type="submit" class="btn">✨ Upload & Analyze</button>
+                    <div class="input-group">
+                        <label for="authHeaderInput">Authorization Header (Bearer Token):</label>
+                        <input type="text" id="authHeaderInput" value="Bearer fd4d7c6b3d2f4441c504368af8eafd59025b77053a8123fd9946501c5ae23612" placeholder="e.g., Bearer your_token_here">
+                    </div>
+                    <div class="input-group">
+                        <label for="jsonInput">JSON Request Body:</label>
+                        <textarea id="jsonInput" placeholder='Paste your JSON request here, e.g.:
+{
+    "documents": "https://hackrx.blob.core.windows.net/assets/policy.pdf?sv=2023-01-03&st=2025-07-04T09%3A11%3A24Z&se=2027-07-05T09%3A11%3A00Z&sr=b&sp=r&sig=N4a9OU0w0QXO6AOIBiu4bpl7AXvEZogeT%2FjUHNO7HzQ%3D",
+    "questions": [
+        "What is the grace period for premium payment under the National Parivar Mediclaim Plus Policy?",
+        "What is the waiting period for pre-existing diseases (PED) to be covered?",
+        "Does this policy cover maternity expenses, and what are the conditions?"
+    ]
+}'></textarea>
+                    </div>
+                    <button type="submit" class="btn">✨ Send API Request</button> {# Changed button text #}
                 </form>
             </div>
             {% endif %}
@@ -498,43 +399,32 @@ HTML_TEMPLATE = """
                 <div class="document-info">
                     <div class="doc-details">
                         <h3><span class="status-dot"></span>{{ filename }}</h3>
+                        <p>Source: {{ source_url }}</p>
                         <p>Uploaded at {{ upload_time }} • {{ chunk_count }} sections processed</p>
                     </div>
-                    <button class="new-doc-btn" onclick="clearDocument()">📎 New Document</button>
+                    <button class="new-doc-btn" onclick="clearDocument()">📎 Send New API Request</button> {# Changed button text #}
                 </div>
 
-                <div class="chat-container" id="chatContainer">
-                    <div class="empty-state">
-                        <div class="empty-icon">💬</div>
-                        <h3>Ready to chat!</h3>
-                        <p>Ask me anything about your PDF document</p>
-                    </div>
-                </div>
-
-                <div id="loading" class="loading" style="display: none;">
-                    <div class="spinner"></div>
-                    <p>AI is thinking...</p>
-                </div>
-
-                <div class="input-section">
-                    <div class="input-container">
-                        <input type="text" id="questionInput" class="question-input" 
-                               placeholder="Ask anything about your document..." 
-                               onkeypress="handleKeyPress(event)">
-                        <button class="send-btn" onclick="askQuestion()">➤</button>
-                    </div>
-                    
-                    <div class="suggestions">
-                        <button class="suggestion" onclick="askSampleQuestion('What is this document about?')">
-                            📋 What's this about?
-                        </button>
-                        <button class="suggestion" onclick="askSampleQuestion('Summarize the key points')">
-                            📝 Key points
-                        </button>
-                        <button class="suggestion" onclick="askSampleQuestion('Any important dates or deadlines?')">
-                            📅 Important dates
-                        </button>
-                    </div>
+                <div class="output-container" id="outputContainer">
+                    {% if answers %}
+                        <div class="output-json-block">
+<pre>
+{
+    "answers": [
+{% for answer in answers %}
+        "{{ answer | e }}"{% if not loop.last %},{% endif %} {# Added | e for HTML escaping #}
+{% endfor %}
+    ]
+}
+</pre>
+                        </div>
+                    {% else %}
+                        <div class="empty-state">
+                            <div class="empty-icon">💬</div>
+                            <h3>Waiting for API input...</h3> {# Changed text #}
+                            <p>Once processed, results will appear here.</p>
+                        </div>
+                    {% endif %}
                 </div>
             </div>
             {% endif %}
@@ -542,128 +432,114 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
-        function handleKeyPress(event) {
-            if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault();
-                askQuestion();
+        document.addEventListener('DOMContentLoaded', function() {
+            const jsonInput = document.getElementById('jsonInput');
+            if (jsonInput) {
+                // Pre-populate with the exact sample from the image
+                jsonInput.value = JSON.stringify({
+                    "documents": "https://hackrx.blob.core.windows.net/assets/policy.pdf?sv=2023-01-03&st=2025-07-04T09%3A11%3A24Z&se=2027-07-05T09%3A11%3A00Z&sr=b&sp=r&sig=N4a9OU0w0QXO6AOIBiu4bpl7AXvEZogeT%2FjUHNO7HzQ%3D",
+                    "questions": [
+                        "What is the grace period for premium payment under the National Parivar Mediclaim Plus Policy?",
+                        "What is the waiting period for pre-existing diseases (PED) to be covered?",
+                        "Does this policy cover maternity expenses, and what are the conditions?",
+                        "What is the waiting period for cataract surgery?",
+                        "Are the medical expenses for an organ donor covered under this policy?",
+                        "What is the No Claim Discount (NCD) offered in this policy?",
+                        "Is there a benefit for preventive health check-ups?",
+                        "How does the policy define a 'Hospital'?",
+                        "What is the extent of coverage for AYUSH treatments?",
+                        "Are there any sub-limits on room rent and ICU charges for Plan A?"
+                    ]
+                }, null, 4);
             }
-        }
+        });
 
-        function askSampleQuestion(question) {
-            document.getElementById('questionInput').value = question;
-            askQuestion();
-        }
-
-        function askQuestion() {
-            const questionInput = document.getElementById('questionInput');
-            const question = questionInput.value.trim();
+        async function submitApiRequest(event) { {# Changed function name #}
+            event.preventDefault();
+            console.log("submitApiRequest called.");
             
-            if (!question) {
-                showNotification('Please enter a question', 'warning');
+            const baseUrlInput = document.getElementById('baseUrlInput');
+            const authHeaderInput = document.getElementById('authHeaderInput');
+            const jsonInput = document.getElementById('jsonInput');
+            const jsonString = jsonInput.value.trim();
+            const submitBtn = document.querySelector('#jsonForm .btn');
+            const loadingDiv = document.getElementById('loading');
+
+            const baseUrl = baseUrlInput.value.trim();
+            const authHeader = authHeaderInput.value.trim();
+
+            if (!baseUrl) {
+                showNotification('Please enter the API Base URL.', 'warning');
+                return;
+            }
+            if (!jsonString) {
+                showNotification('Please enter your JSON request.', 'warning');
+                return;
+            }
+            // Authorization header is optional for local dev, but if present, validate format
+            if (authHeader && !authHeader.toLowerCase().startsWith('bearer ')) {
+                showNotification('Authorization header must start with "Bearer "', 'warning');
                 return;
             }
 
-            addMessageToChat(question, 'user');
-            questionInput.value = '';
-            document.getElementById('loading').style.display = 'block';
-            questionInput.disabled = true;
+            try {
+                JSON.parse(jsonString);
+                console.log("JSON parsed successfully, attempting API call.");
+            } catch (e) {
+                showNotification('Invalid JSON format. Please check your input.', 'error');
+                console.error("JSON parsing error:", e);
+                return;
+            }
 
-            fetch('/ask', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ question: question })
-            })
-            .then(response => response.json())
-            .then(data => {
-                document.getElementById('loading').style.display = 'none';
-                questionInput.disabled = false;
-                questionInput.focus();
-                
-                if (data.success) {
-                    addResponseToChat(data.response);
-                } else {
-                    addErrorToChat(data.error);
+            if (loadingDiv) {
+                loadingDiv.style.display = 'block';
+            }
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '⏳ Sending Request...'; {# Changed button text #}
+
+            try {
+                // Construct the full API URL based on the image
+                const apiUrl = `${baseUrl}/hackrx/run`; {# Modified API URL #}
+
+                const headers = { 'Content-Type': 'application/json' };
+                if (authHeader) {
+                    headers['Authorization'] = authHeader;
                 }
-            })
-            .catch(error => {
-                document.getElementById('loading').style.display = 'none';
-                questionInput.disabled = false;
-                questionInput.focus();
-                addErrorToChat('Network error: ' + error.message);
-            });
-        }
 
-        function addMessageToChat(message, sender) {
-            const chatContainer = document.getElementById('chatContainer');
-            
-            if (chatContainer.querySelector('.empty-state')) {
-                chatContainer.innerHTML = '';
-            }
-            
-            const messageDiv = document.createElement('div');
-            messageDiv.className = `message ${sender}-message`;
-            
-            if (sender === 'user') {
-                messageDiv.innerHTML = `<div class="user-bubble">${message}</div>`;
-            }
-            
-            chatContainer.appendChild(messageDiv);
-            chatContainer.scrollTop = chatContainer.scrollHeight;
-        }
+                const response = await fetch(apiUrl, { {# Changed URL #}
+                    method: 'POST',
+                    headers: headers, {# Added headers #}
+                    body: jsonString
+                });
+                const data = await response.json();
+                console.log("API response received:", data);
 
-        function addResponseToChat(response) {
-            const chatContainer = document.getElementById('chatContainer');
-            
-            const messageDiv = document.createElement('div');
-            messageDiv.className = 'message bot-message';
-            
-            const decision = response.decision || 'Unknown';
-            const amount = response.amount && response.amount !== 'null' ? response.amount : null;
-            const justification = response.justification || 'No explanation provided.';
-            
-            let badgeClass = 'unknown';
-            if (decision.toLowerCase().includes('covered') && !decision.toLowerCase().includes('not')) {
-                badgeClass = decision.toLowerCase().includes('partially') ? 'partial' : 'covered';
-            } else if (decision.toLowerCase().includes('not covered')) {
-                badgeClass = 'not-covered';
+                if (data.success) {
+                    showNotification('API request processed successfully!', 'success');
+                    setTimeout(() => location.reload(), 500); 
+                } else {
+                    showNotification('Error from API: ' + (data.error || 'Unknown error'), 'error');
+                }
+            } catch (error) {
+                console.error('Network or API call error:', error);
+                showNotification('Network or API call error: ' + error.message, 'error');
+            } finally {
+                if (loadingDiv) {
+                    loadingDiv.style.display = 'none';
+                }
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '✨ Send API Request'; {# Changed button text #}
+                console.log("API request finished.");
             }
-            
-            let responseHtml = `
-                <div class="bot-bubble">
-                    <div class="decision-badge ${badgeClass}">${decision}</div>
-                    ${amount ? `<div style="margin-bottom: 10px; font-weight: 600; color: #667eea;">${amount}</div>` : ''}
-                    <div>${justification}</div>
-                </div>
-            `;
-            
-            messageDiv.innerHTML = responseHtml;
-            chatContainer.appendChild(messageDiv);
-            chatContainer.scrollTop = chatContainer.scrollHeight;
-        }
-
-        function addErrorToChat(error) {
-            const chatContainer = document.getElementById('chatContainer');
-            
-            const messageDiv = document.createElement('div');
-            messageDiv.className = 'message bot-message';
-            messageDiv.innerHTML = `
-                <div class="bot-bubble" style="border-left: 4px solid #ef4444;">
-                    <div style="color: #ef4444; font-weight: 600; margin-bottom: 10px;">❌ Error</div>
-                    <div>${error}</div>
-                </div>
-            `;
-            
-            chatContainer.appendChild(messageDiv);
-            chatContainer.scrollTop = chatContainer.scrollHeight;
         }
 
         function clearDocument() {
-            if (confirm('Upload a new document? This will clear the current conversation.')) {
+            if (confirm('Send a new API request? This will clear current results.')) { {# Changed text #}
                 fetch('/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
-                        showNotification('Document cleared!', 'success');
+                        showNotification('Current results cleared!', 'success'); {# Changed text #}
                         setTimeout(() => location.reload(), 1000);
                     } else {
                         showNotification('Error: ' + data.error, 'error');
@@ -685,49 +561,6 @@ HTML_TEMPLATE = """
                 setTimeout(() => notification.remove(), 300);
             }, 3000);
         }
-
-        // File upload handling
-        document.addEventListener('DOMContentLoaded', function() {
-            const fileInput = document.getElementById('fileInput');
-            const uploadForm = document.getElementById('uploadForm');
-            
-            if (fileInput) {
-                fileInput.addEventListener('change', function() {
-                    const file = this.files[0];
-                    if (file) {
-                        if (file.type !== 'application/pdf') {
-                            showNotification('Please select a PDF file', 'warning');
-                            this.value = '';
-                            return;
-                        }
-                        if (file.size > 16 * 1024 * 1024) {
-                            showNotification('File size must be less than 16MB', 'warning');
-                            this.value = '';
-                            return;
-                        }
-                        
-                        // Show file selected feedback
-                        const uploadArea = document.querySelector('.upload-area');
-                        const uploadText = document.querySelector('.upload-text');
-                        uploadText.textContent = `Selected: ${file.name}`;
-                        uploadArea.style.borderColor = '#10b981';
-                        uploadArea.style.background = 'linear-gradient(145deg, #dcfce7 0%, #bbf7d0 100%)';
-                    }
-                });
-                
-                uploadForm.addEventListener('submit', function() {
-                    const submitBtn = this.querySelector('.btn');
-                    submitBtn.innerHTML = '⏳ Processing...';
-                    submitBtn.disabled = true;
-                });
-            }
-            
-            // Focus on question input if document is loaded
-            const questionInput = document.getElementById('questionInput');
-            if (questionInput) {
-                questionInput.focus();
-            }
-        });
     </script>
 </body>
 </html>
@@ -735,176 +568,183 @@ HTML_TEMPLATE = """
 
 @app.route('/')
 def index():
-    # Add cache-busting headers
     response = app.response_class(
         render_template_string(HTML_TEMPLATE, 
                               document_loaded=current_document['chunks'] is not None,
                               filename=current_document['filename'],
+                              source_url=current_document['source_url'],
                               upload_time=current_document.get('upload_time', 'Unknown'),
-                              chunk_count=current_document.get('chunk_count', 0))
+                              chunk_count=current_document.get('chunk_count', 0),
+                              answers=current_document['answers'])
     )
     response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
     response.headers['Pragma'] = 'no-cache'
     response.headers['Expires'] = '0'
     return response
 
-@app.route('/upload', methods=['POST'])
-def upload_file():
+# MODIFIED: Changed endpoint to /hackrx/run as per the image
+@app.route('/hackrx/run', methods=['POST'])
+def run_hackrx_request(): # Renamed function for clarity
     try:
-        if 'file' not in request.files:
-            flash('No file selected')
-            return redirect(url_for('index'))
+        # Check for Authorization header
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'success': False, 'error': 'Unauthorized: Bearer token missing or malformed.'}), 401
         
-        file = request.files['file']
-        if file.filename == '' or not allowed_file(file.filename):
-            flash('Please upload a valid PDF file')
-            return redirect(url_for('index'))
-        
-        # Clear previous document first
+        # You could add token validation here, e.g., if token == "your_expected_token":
+        # For now, we just check its presence and format.
+        token = auth_header.split(' ')[1]
+        print(f"Received Authorization Token: {token}") # For debugging
+
+        req_data = request.get_json()
+        if not req_data:
+            return jsonify({'success': False, 'error': 'Invalid JSON payload.'}), 400
+
+        document_url = req_data.get('documents')
+        questions = req_data.get('questions', [])
+
+        if not document_url:
+            return jsonify({'success': False, 'error': 'Document URL is missing in the JSON payload.'}), 400
+        if not isinstance(questions, list) or not questions:
+            return jsonify({'success': False, 'error': 'Questions array is missing or empty in the JSON payload.'}), 400
+
         current_document.update({
             'chunks': None,
             'embeddings': None,
             'index': None,
             'model_st': None,
+            'source_url': None,
             'filename': None,
             'upload_time': None,
-            'chunk_count': 0
+            'chunk_count': 0,
+            'questions': [],
+            'answers': []
         })
-        
-        # Save file to temporary location and process it
+
         temp_file_path = None
         try:
-            # Create temporary file
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+            parsed_url = urlparse(document_url)
+            path_segments = parsed_url.path.split('/')
+            
+            base_filename = path_segments[-1] if path_segments[-1] else 'document' 
+
+            if '.' not in base_filename:
+                return jsonify({'success': False, 'error': f'Could not determine file type from URL: {document_url}. URL must contain a file extension.'}), 400
+            
+            file_extension = base_filename.rsplit('.', 1)[1].lower()
+
+            if not allowed_file_extension(base_filename):
+                return jsonify({'success': False, 'error': f'Unsupported document type from URL: .{file_extension}. Only PDF, DOCX, EML are supported.'}), 400
+
+            print(f"Attempting to download document from: {document_url}")
+            response = requests.get(document_url, stream=True)
+            response.raise_for_status()
+
+            if int(response.headers.get('content-length', 0)) > MAX_FILE_SIZE:
+                return jsonify({'success': False, 'error': f'Downloaded file size exceeds limit ({MAX_FILE_SIZE / (1024*1024)}MB)'}), 413
+
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_extension}')
             temp_file_path = temp_file.name
-            
-            # Save the uploaded file
-            file.save(temp_file_path)
-            temp_file.close()  # Explicitly close the file
-            
-            # Add a small delay to ensure file is released
-            time.sleep(0.1)
-            gc.collect()  # Force garbage collection
-            
-            print(f"Processing new PDF: {file.filename}")  # Debug log
-            
-            # Process the PDF (file is now closed and released)
-            text = extract_text_from_pdf(temp_file_path)
+            with open(temp_file_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            temp_file.close()
+
+            print(f"Successfully downloaded {base_filename} to {temp_file_path}")
+
+            text = extract_text_from_document(temp_file_path, file_extension)
             chunks, embeddings, index, model_st = create_document_embeddings(text)
-            
-            # Store in global variables
+
             current_document.update({
                 'chunks': chunks,
                 'embeddings': embeddings,
                 'index': index,
                 'model_st': model_st,
-                'filename': secure_filename(file.filename),
+                'source_url': document_url,
+                'filename': base_filename,
                 'upload_time': time.strftime('%H:%M:%S'),
-                'chunk_count': len(chunks)
+                'chunk_count': len(chunks),
+                'questions': questions
             })
             
-            print(f"Successfully processed PDF: {file.filename} with {len(chunks)} chunks")  # Debug log
-            
-            flash(f'✅ PDF "{file.filename}" uploaded and processed successfully! Ready for AI analysis with {len(chunks)} text sections.')
-            return redirect(url_for('index'))
+            print(f"Document '{base_filename}' processed with {len(chunks)} chunks. Now answering questions...")
+
+            collected_answers = []
+            for q_text in questions:
+                try:
+                    answer_string = generate_response(
+                        q_text, 
+                        current_document['chunks'],
+                        current_document['embeddings'],
+                        current_document['index'],
+                        current_document['model_st']
+                    )
+                    collected_answers.append(answer_string)
+                except Exception as question_e:
+                    collected_answers.append(f"Error answering question '{q_text}': {str(question_e)}")
+                print(f"Answered '{q_text}'")
+
+            current_document['answers'] = collected_answers
+
+            print("All questions answered.")
+            # Return JSON in the exact format shown in your sample response image (image_ee6ae5.png)
+            return jsonify({'answers': collected_answers}) # Modified: Simpler JSON response
             
         finally:
-            # Clean up temp file safely with retry mechanism
             if temp_file_path and os.path.exists(temp_file_path):
                 max_retries = 5
                 for attempt in range(max_retries):
                     try:
-                        time.sleep(0.1 * (attempt + 1))  # Increasing delay
+                        time.sleep(0.1 * (attempt + 1))
                         os.unlink(temp_file_path)
-                        break  # Success, exit retry loop
+                        break
                     except PermissionError as e:
                         if attempt == max_retries - 1:
                             print(f"Warning: Could not delete temp file after {max_retries} attempts: {temp_file_path}")
-                            # File will be cleaned up by system temp folder cleanup
                         else:
                             print(f"Retry {attempt + 1}/{max_retries} to delete temp file: {e}")
-                            gc.collect()  # Force garbage collection between retries
+                            gc.collect()
                     except Exception as cleanup_error:
                         print(f"Warning: Unexpected error deleting temp file {temp_file_path}: {cleanup_error}")
                         break
         
+    except requests.exceptions.RequestException as re:
+        error_msg = f"Network or download error: {str(re)}"
+        print(f"Download error: {traceback.format_exc()}")
+        return jsonify({'success': False, 'error': error_msg}), 500
+    except json.JSONDecodeError:
+        error_msg = 'Invalid JSON format in request body.'
+        print(f"JSON parsing error: {traceback.format_exc()}")
+        return jsonify({'success': False, 'error': error_msg}), 400
     except Exception as e:
-        flash(f'❌ Error processing file: {str(e)}')
-        print(f"Upload error: {traceback.format_exc()}")
-        return redirect(url_for('index'))
-
-@app.route('/ask', methods=['POST'])
-def ask_question():
-    try:
-        data = request.get_json()
-        question = data.get('question', '').strip()
-        
-        if not question:
-            return jsonify({'error': 'Please enter a question'}), 400
-        
-        if current_document['chunks'] is None:
-            return jsonify({'error': 'Please upload a PDF first'}), 400
-        
-        print(f"Answering question for PDF: {current_document['filename']}")  # Debug log
-        print(f"Question: {question}")  # Debug log
-        print(f"Using {len(current_document['chunks'])} chunks from document")  # Debug log
-        
-        # Generate response
-        response = generate_response(
-            question, 
-            current_document['chunks'],
-            current_document['embeddings'],
-            current_document['index'],
-            current_document['model_st']
-        )
-        
-        # Parse the JSON response
-        try:
-            response_data = json.loads(response)
-            # Add document info to response for debugging
-            response_data['_debug_info'] = {
-                'document': current_document['filename'],
-                'chunks_count': len(current_document['chunks'])
-            }
-            return jsonify({'success': True, 'response': response_data})
-        except json.JSONDecodeError:
-            return jsonify({
-                'success': True,
-                'response': {
-                    'decision': 'Response received',
-                    'amount': None,
-                    'justification': response,
-                    '_debug_info': {
-                        'document': current_document['filename'],
-                        'chunks_count': len(current_document['chunks'])
-                    }
-                }
-            })
-            
-    except Exception as e:
-        print(f"Question processing error: {traceback.format_exc()}")
-        return jsonify({'error': f'Error processing question: {str(e)}'}), 500
+        error_msg = f'Error processing request: {str(e)}'
+        print(f"Processing error: {traceback.format_exc()}")
+        return jsonify({'success': False, 'error': error_msg}), 500
 
 @app.route('/clear', methods=['POST'])
 def clear_document():
     try:
         current_document.update({
             'chunks': None, 'embeddings': None, 'index': None, 
-            'model_st': None, 'filename': None, 'upload_time': None, 'chunk_count': 0
+            'model_st': None, 'source_url': None, 'filename': None, 
+            'upload_time': None, 'chunk_count': 0,
+            'questions': [], 'answers': []
         })
-        return jsonify({'success': True, 'message': 'Document cleared successfully'})
+        return jsonify({'success': True, 'message': 'Document and answers cleared successfully'})
     except Exception as e:
         return jsonify({'error': f'Error clearing document: {str(e)}'}), 500
 
 @app.route('/status')
 def get_status():
-    """Endpoint to check current document status"""
     return jsonify({
         'document_loaded': current_document['chunks'] is not None,
         'filename': current_document['filename'],
+        'source_url': current_document['source_url'],
         'chunks_count': len(current_document['chunks']) if current_document['chunks'] else 0,
         'upload_time': current_document.get('upload_time', None),
-        'model_ready': current_document['model_st'] is not None
+        'model_ready': current_document['model_st'] is not None,
+        'questions_count': len(current_document['questions']),
+        'answers_count': len(current_document['answers'])
     })
 
 if __name__ == '__main__':
