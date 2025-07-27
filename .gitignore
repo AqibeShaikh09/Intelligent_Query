@@ -48,9 +48,6 @@ uploads/
 *.tmp
 *.temp
 
-# Ngrok
-ngrok.exe
-*.ngrok-free.app
 
 # Local development
 .vscode/settings.json

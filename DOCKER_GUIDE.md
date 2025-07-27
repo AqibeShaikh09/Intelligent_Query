@@ -127,13 +127,9 @@ docker-compose exec pdf-qa-app bash
 ### Using ngrok (Temporary)
 ```bash
 # Install ngrok first, then:
-ngrok http 5000
 ```
 
 ### Using Cloud Platforms (Permanent)
-- Deploy to Railway, Heroku, or DigitalOcean
-- Use the same Docker setup
-- Set environment variables in the platform's dashboard
 
 ## Performance Tips
 

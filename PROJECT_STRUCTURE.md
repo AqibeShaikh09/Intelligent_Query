@@ -11,9 +11,6 @@ pdf-qa-system/
 │   ├── setup-ngrok.bat         # Ngrok setup (Windows)
 │   ├── start-ngrok.bat         # Start ngrok tunnel
 │   ├── start-server.bat        # Start server (Windows)
-│   ├── test_openai_docker.py   # OpenAI API test
-│   ├── test_openrouter.py      # OpenRouter API test
-│   └── simple_test.py          # Simple functionality test
 ├── docs/                        # Documentation
 │   ├── DOCKER_README.md        # Docker setup guide
 │   ├── NGROK-SETUP.md          # Ngrok setup guide

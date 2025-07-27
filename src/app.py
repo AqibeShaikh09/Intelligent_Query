@@ -116,15 +116,31 @@ def generate_response(query, chunks, embeddings=None, index=None, model_st=None,
     
     try:
         api_key = get_api_key()
+        if not api_key:
+            raise ValueError("No API key found")
+            
+        # Set the API key in environment for OpenAI client
+        os.environ['OPENAI_API_KEY'] = api_key
+        
         client = OpenAI(
             api_key=api_key,
             base_url="https://openrouter.ai/api/v1"
         )
+        
+        print(f"✅ OpenAI client initialized with API key: {api_key[:20]}...")
+        
     except ValueError as e:
         print(f"API Key Error: {e}")
         return json.dumps({
             "answer": "❌ API key not configured. Please set OPENROUTER_API_KEY in your .env file.",
             "justification": "Cannot process query without API key.",
+            "confidence": 0.0
+        })
+    except Exception as e:
+        print(f"Client initialization error: {e}")
+        return json.dumps({
+            "answer": "❌ Failed to initialize AI client.",
+            "justification": f"Error: {str(e)}",
             "confidence": 0.0
         })
     
