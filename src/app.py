@@ -189,6 +189,7 @@ Format: {{"decision": "...", "amount": "...", "justification": "..."}}"""
                 {"role": "system", "content": "You are an AI assistant that analyzes documents and provides JSON responses."},
                 {"role": "user", "content": prompt}
             ],
+            max_tokens=1000,
             extra_headers={
                 "HTTP-Referer": "http://localhost:5000",
                 "X-Title": "PDF Q&A System"
