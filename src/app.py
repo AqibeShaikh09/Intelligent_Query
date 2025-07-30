@@ -1,4 +1,11 @@
 import pdfplumber
+import fitz  # PyMuPDF for fast PDF extraction
+import requests
+import tempfile
+import mimetypes
+from docx import Document
+import email
+import email.policy
 from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
@@ -32,17 +39,52 @@ def get_api_key():
 
 # Step 1: Document Ingestion
 def extract_text_from_pdf(pdf_path):
-    with pdfplumber.open(pdf_path) as pdf:
-        text = ""
-        for page in pdf.pages:
-            text += page.extract_text() or ""
+    doc = fitz.open(pdf_path)
+    text = ""
+    for page in doc:
+        text += page.get_text()
+    doc.close()
     # Clean text (e.g., remove OCR errors)
     text = text.replace("iviviv", "").replace("Air Ambulasce", "Air Ambulance")
     return text
 
+# DOCX extraction
+def extract_text_from_docx(docx_path):
+    doc = Document(docx_path)
+    text = "\n".join([para.text for para in doc.paragraphs])
+    return text
+
+# Email extraction (.eml)
+def extract_text_from_email(email_path):
+    with open(email_path, 'rb') as f:
+        msg = email.message_from_binary_file(f, policy=email.policy.default)
+    text = msg.get_body(preferencelist=('plain')).get_content() if msg.get_body(preferencelist=('plain')) else ''
+    return text
+
+# Download file from URL and auto-detect type
+def download_and_extract_text(url):
+    response = requests.get(url)
+    if response.status_code != 200:
+        raise Exception(f"Failed to download file: {url}")
+    # Guess file type from headers or URL
+    content_type = response.headers.get('content-type', '')
+    ext = mimetypes.guess_extension(content_type) or url.split('.')[-1].lower()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+        tmp.write(response.content)
+        tmp_path = tmp.name
+    # Dispatch to correct extractor
+    if ext in ['.pdf', 'pdf']:
+        return extract_text_from_pdf(tmp_path)
+    elif ext in ['.docx', 'docx']:
+        return extract_text_from_docx(tmp_path)
+    elif ext in ['.eml', 'msg']:
+        return extract_text_from_email(tmp_path)
+    else:
+        raise Exception(f"Unsupported file type: {ext}")
+
 # Step 2: Text Chunking and Embedding
 def create_document_embeddings(text):
-    model = SentenceTransformer('all-MiniLM-L6-v2')
+    model = SentenceTransformer('BAAI/bge-large-en-v1.5')
     
     # Split into smaller chunks to manage token limits better
     # First split by paragraphs, then further split if needed
@@ -183,10 +225,17 @@ Format: {{"decision": "...", "amount": "...", "justification": "..."}}"""
 
     try:
         # Generate response using OpenRouter with new API
+        system_prompt = (
+            "You are an expert insurance analyst AI. "
+            "Always answer strictly based on the provided document excerpts. "
+            "If the answer is not present, reply 'Unable to determine'. "
+            "Return your answer in the specified JSON format. "
+            "Do not hallucinate or make assumptions."
+        )
         response = client.chat.completions.create(
             model=llm_model,
             messages=[
-                {"role": "system", "content": "You are an AI assistant that analyzes documents and provides JSON responses."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=1000,
@@ -276,49 +325,75 @@ def interactive_qa_session(chunks, embeddings, index, model_st):
             print("Please try asking your question again.")
 
 # Main Execution
-if __name__ == "__main__":
-    print("🚀 Starting PDF Analysis System...")
-    
-    # Get PDF file path from user
-    while True:
-        pdf_path = input("\n📁 Enter the path to your PDF file (or drag and drop the file here): ").strip().strip('"')
-        
-        if os.path.exists(pdf_path) and pdf_path.lower().endswith('.pdf'):
-            break
-        else:
-            print("❌ File not found or not a PDF file. Please try again.")
-            print("Make sure to provide the full path to your PDF file.")
-    
+
+from fastapi import FastAPI, UploadFile, File, Form, Request, Header, Body
+from fastapi.responses import JSONResponse
+import uvicorn
+from typing import List, Optional
+
+
+app = FastAPI()
+
+def verify_bearer_token(authorization: str):
+    """
+    Verifies Bearer token from Authorization header.
+    Replace 'YOUR_HACKRX_TOKEN' with your actual token or use env variable.
+    """
+    required_token = os.getenv('HACKRX_BEARER_TOKEN', 'YOUR_HACKRX_TOKEN')
+    if not authorization or not authorization.startswith('Bearer '):
+        return False, "Missing or invalid Authorization header."
+    token = authorization.split('Bearer ')[-1].strip()
+    if token != required_token:
+        return False, "Invalid Bearer token."
+    return True, None
+
+# HackRx 6.0 compliant endpoint
+
+
+@app.post("/hackrx/run")
+async def hackrx_run(
+    request: Request,
+    authorization: str = Header(None),
+    documents: Optional[str] = Body(None),
+    questions: Optional[List[str]] = Body(None)
+):
+    # Verify Bearer token
+    ok, err = verify_bearer_token(authorization)
+    if not ok:
+        return JSONResponse({"success": False, "error": err}, status_code=401)
+
+    # Check if documents and questions are provided
+    if not documents or not questions:
+        return JSONResponse({"success": False, "error": "No valid input provided."}, status_code=400)
+
     try:
-        print(f"📖 Extracting text from PDF: {os.path.basename(pdf_path)}...")
-        text = extract_text_from_pdf(pdf_path)
-        
-        print("🧠 Creating document embeddings...")
+        # Download and extract text from the document URL
+        text = download_and_extract_text(documents)
         chunks, embeddings, index, model_st = create_document_embeddings(text)
-        
-        print("✅ PDF processing complete!")
-        
-        # Ask user for interaction mode
-        print("\nChoose an option:")
-        print("1. Interactive Q&A session")
-        print("2. Run single test query")
-        
-        choice = input("\nEnter your choice (1 or 2): ").strip()
-        
-        if choice == "1":
-            # Start interactive session
-            interactive_qa_session(chunks, embeddings, index, model_st)
-        else:
-            # Run test query
-            print("\n🧪 Running test query...")
-            query = "Is routine preventive care covered for a mother who has just delivered a newborn under this policy?"
-            response = generate_response(query, chunks, embeddings, index, model_st)
-            print("\n📋 Test Response:")
-            print(response)
-            
-    except FileNotFoundError:
-        print(f"❌ Error: PDF file '{os.path.basename(pdf_path)}' not found!")
-        print("Please make sure the PDF file exists and the path is correct.")
+
+        # Generate answers for each question
+        answers = []
+        for q in questions:
+            response = generate_response(q, chunks, embeddings, index, model_st)
+            try:
+                result = json.loads(response)
+                answer = result.get('justification') or str(result)
+            except Exception:
+                answer = response
+            answers.append(answer)
+
+        return JSONResponse({"answers": answers})
+
     except Exception as e:
-        print(f"❌ An error occurred during PDF processing: {str(e)}")
-        print("Please check your PDF file and try again.")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+    
+if __name__ == "__main__":
+    # Load environment variables
+    load_dotenv()
+    
+    # Get API key and set it for OpenAI client
+    api_key = get_api_key()
+    openai.api_key = api_key
+    
+    # Start the FastAPI server
+    uvicorn.run(app, host="0.0.0.0", port=8000)
