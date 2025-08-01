@@ -4,8 +4,8 @@ import time
 from sentence_transformers import SentenceTransformer, util
 
 # Update these variables
-API_URL = "http://localhost:8000/hackrx/run"
-HACKRX_BEARER_TOKEN= "myfaketoken123"  # Replace with your actual token
+API_URL = "http://localhost:3000/hackrx/run"
+HACKRX_BEARER_TOKEN= "fd4d7c6b3d2f4441c504368af8eafd59025b77053a8123fd9946501c5ae23612"  # Replace with your actual token
 
 # Leaderboard-style test: PDF URL and questions
 PDF_URL = "https://hackrx.blob.core.windows.net/assets/policy.pdf?sv=2023-01-03&st=2025-07-04T09%3A11%3A24Z&se=2027-07-05T09%3A11%3A00Z&sr=b&sp=r&sig=N4a9OU0w0QXO6AOIBiu4bpl7AXvEZogeT%2FjUHNO7HzQ%3D"

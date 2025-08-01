@@ -7,6 +7,19 @@ import tempfile
 import traceback
 import time
 import gc
+import secrets
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('web_app.log')
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Smart import handling for different deployment scenarios
 def import_app_module():
@@ -46,10 +59,10 @@ def import_app_module():
 # Import the required functions
 try:
     extract_text_from_pdf, create_document_embeddings, generate_response = import_app_module()
-    print("✅ Successfully imported app module functions")
+    logger.info("Successfully imported app module functions")
 except Exception as import_error:
-    print(f"❌ Failed to import app module: {import_error}")
-    print("Please ensure app.py is in the same directory as web_app.py")
+    logger.error(f"Failed to import app module: {import_error}")
+    logger.error("Please ensure app.py is in the same directory as web_app.py")
     sys.exit(1)
 
 def get_api_key():
@@ -65,7 +78,7 @@ def get_api_key():
     # Fallback: OpenAI API key (for backward compatibility)
     api_key = os.environ.get('OPENAI_API_KEY')
     if api_key:
-        print("⚠️  WARNING: Using OPENAI_API_KEY. Consider renaming to OPENROUTER_API_KEY")
+        logger.warning("Using OPENAI_API_KEY. Consider renaming to OPENROUTER_API_KEY")
         return api_key, 'OPENAI_API_KEY'
     
     return None, None
@@ -75,29 +88,40 @@ def validate_api_configuration():
     api_key, key_source = get_api_key()
     
     if not api_key:
-        print("❌ No API key found!")
-        print("   Please set one of the following environment variables:")
-        print("   - OPENROUTER_API_KEY (recommended)")
-        print("   - OPENAI_API_KEY (for backward compatibility)")
-        print("   Check your .env file or environment variables")
+        logger.error("No API key found!")
+        logger.info("Please set one of the following environment variables:")
+        logger.info("- OPENROUTER_API_KEY (recommended)")
+        logger.info("- OPENAI_API_KEY (for backward compatibility)")
+        logger.info("Check your .env file or environment variables")
         return False
     
-    print(f"✅ API key found: {key_source}")
+    logger.info(f"API key found: {key_source}")
     
     # Validate key format
     if not api_key.startswith(('sk-', 'or-')):
-        print(f"⚠️  WARNING: API key format unusual (should start with 'sk-' or 'or-')")
+        logger.warning("API key format unusual (should start with 'sk-' or 'or-')")
     
     return True
 
+import secrets
+
 # Validate API configuration at startup
 if not validate_api_configuration():
-    print("💡 HINT: Create a .env file with:")
-    print("   OPENROUTER_API_KEY=your_actual_api_key_here")
-    print("\n🔄 Application will continue but AI features may not work")
+    logger.warning("API configuration validation failed")
+    logger.info("HINT: Create a .env file with:")
+    logger.info("OPENROUTER_API_KEY=your_actual_api_key_here")
+    logger.info("Application will continue but AI features may not work")
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
+
+# Secure secret key handling
+secret_key = os.environ.get('SECRET_KEY')
+if not secret_key:
+    # Generate a random secret key for development
+    secret_key = secrets.token_hex(32)
+    logger.warning("Using generated secret key. Set SECRET_KEY environment variable for production.")
+
+app.secret_key = secret_key
 
 # Configuration
 ALLOWED_EXTENSIONS = {'pdf'}
@@ -874,7 +898,7 @@ def upload_file():
             time.sleep(0.1)
             gc.collect()  # Force garbage collection
             
-            print(f"Processing new PDF: {file.filename}")  # Debug log
+            logger.info(f"Processing new PDF: {file.filename}")
             
             # Process the PDF (file is now closed and released)
             text = extract_text_from_pdf(temp_file_path)
@@ -891,7 +915,7 @@ def upload_file():
                 'chunk_count': len(chunks)
             })
             
-            print(f"Successfully processed PDF: {file.filename} with {len(chunks)} chunks")  # Debug log
+            logger.info(f"Successfully processed PDF: {file.filename} with {len(chunks)} chunks")
             
             flash(f'✅ PDF "{file.filename}" uploaded and processed successfully! Ready for AI analysis with {len(chunks)} text sections.')
             return redirect(url_for('index'))
@@ -907,18 +931,18 @@ def upload_file():
                         break  # Success, exit retry loop
                     except PermissionError as e:
                         if attempt == max_retries - 1:
-                            print(f"Warning: Could not delete temp file after {max_retries} attempts: {temp_file_path}")
+                            logger.warning(f"Could not delete temp file after {max_retries} attempts: {temp_file_path}")
                             # File will be cleaned up by system temp folder cleanup
                         else:
-                            print(f"Retry {attempt + 1}/{max_retries} to delete temp file: {e}")
+                            logger.debug(f"Retry {attempt + 1}/{max_retries} to delete temp file: {e}")
                             gc.collect()  # Force garbage collection between retries
                     except Exception as cleanup_error:
-                        print(f"Warning: Unexpected error deleting temp file {temp_file_path}: {cleanup_error}")
+                        logger.warning(f"Unexpected error deleting temp file {temp_file_path}: {cleanup_error}")
                         break
         
     except Exception as e:
         flash(f'❌ Error processing file: {str(e)}')
-        print(f"Upload error: {traceback.format_exc()}")
+        logger.error(f"Upload error: {traceback.format_exc()}")
         return redirect(url_for('index'))
 
 @app.route('/ask', methods=['POST'])
@@ -940,10 +964,10 @@ def ask_question():
                 'error': 'No API key configured. Please set OPENROUTER_API_KEY in your .env file.'
             }), 500
         
-        print(f"Answering question for PDF: {current_document['filename']}")  # Debug log
-        print(f"Question: {question}")  # Debug log
-        print(f"Using {len(current_document['chunks'])} chunks from document")  # Debug log
-        print(f"API Key source: {key_source}")  # Debug log
+        logger.info(f"Answering question for PDF: {current_document['filename']}")
+        logger.debug(f"Question: {question}")
+        logger.debug(f"Using {len(current_document['chunks'])} chunks from document")
+        logger.debug(f"API Key source: {key_source}")
         
         # Generate response
         response = generate_response(
