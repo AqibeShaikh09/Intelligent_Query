@@ -86,10 +86,15 @@ def test_import_locally():
     """Test if imports work locally"""
     print("🐍 Testing Python imports...")
     try:
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        src_path = os.path.join(os.path.dirname(__file__), 'src')
+        if src_path not in sys.path:
+            sys.path.insert(0, src_path)
         
         # Test the smart import function
-        from web_app import import_app_module
+        try:
+            from src.web_app import import_app_module
+        except ModuleNotFoundError as e:
+            raise ImportError(f"Could not find 'web_app.py' in {src_path}. Please ensure the file exists.") from e
         extract_text_from_pdf, create_document_embeddings, generate_response = import_app_module()
         
         print("✅ Local imports working correctly")

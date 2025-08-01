@@ -90,8 +90,20 @@ def start_application():
     
     try:
         # Try to import and run the Flask app
-        sys.path.insert(0, 'src')
-        from web_app import app
+        src_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src')
+        if src_dir not in sys.path:
+            sys.path.insert(0, src_dir)
+        if not os.path.exists(os.path.join(src_dir, 'web_app.py')):
+            print(f"❌ src/web_app.py not found in {src_dir}")
+            sys.exit(1)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("web_app", os.path.join(src_dir, "web_app.py"))
+        web_app = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(web_app)
+        app = getattr(web_app, "app", None)
+        if app is None:
+            print("❌ 'app' not found in web_app.py")
+            sys.exit(1)
         
         # Run the application
         app.run(

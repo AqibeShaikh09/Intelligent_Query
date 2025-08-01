@@ -4,7 +4,7 @@ import difflib
 
 # Hackathon leaderboard test parameters
 API_URL = "http://localhost:8000/hackrx/run"
-BEARER_TOKEN = "fd4d7c6b3d2f4441c504368af8eafd59025b77053a8123fd9946501c5ae23612"  # Hackathon leaderboard token
+HACKRX_BEARER_TOKEN = "myfaketoken123"  # Hackathon leaderboard token
 PDF_URL = "https://hackrx.blob.core.windows.net/assets/policy.pdf?sv=2023-01-03&st=2025-07-04T09%3A11%3A24Z&se=2027-07-05T09%3A11%3A00Z&sr=b&sp=r&sig=N4a9OU0w0QXO6AOIBiu4bpl7AXvEZogeT%2FjUHNO7HzQ%3D"
 questions = [
     "What is the grace period for premium payment under the National Parivar Mediclaim Plus Policy?",
@@ -31,7 +31,7 @@ expected_answers = [
     "Yes, for Plan A, the daily room rent is capped at 1% of the Sum Insured, and ICU charges are capped at 2% of the Sum Insured. These limits do not apply if the treatment is for a listed procedure in a Preferred Provider Network (PPN)."
 ]
 headers = {
-    "Authorization": f"Bearer {BEARER_TOKEN}",
+    "Authorization": f"Bearer {HACKRX_BEARER_TOKEN}",
     "Content-Type": "application/json",
     "Accept": "application/json"
 }

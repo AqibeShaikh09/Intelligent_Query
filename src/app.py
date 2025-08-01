@@ -238,7 +238,7 @@ Format: {{"decision": "...", "amount": "...", "justification": "..."}}"""
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=1000,
+            max_tokens=256,  # Lower this value
             extra_headers={
                 "HTTP-Referer": "http://localhost:5000",
                 "X-Title": "PDF Q&A System"
@@ -382,7 +382,16 @@ async def hackrx_run(
                 answer = response
             answers.append(answer)
 
-        return JSONResponse({"answers": answers})
+        # Add processing_info for leaderboard compliance
+        processing_info = {
+            "response_time": None,  # You can set actual timing if needed
+            "token_usage": None    # Set if available from LLM response
+        }
+        return JSONResponse({
+            "success": True,
+            "answers": answers,
+            "processing_info": processing_info
+        })
 
     except Exception as e:
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
@@ -396,4 +405,4 @@ if __name__ == "__main__":
     openai.api_key = api_key
     
     # Start the FastAPI server
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=3000)
